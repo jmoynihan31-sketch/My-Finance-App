@@ -68,9 +68,12 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; b
   padding: 1rem; border: 1.5px solid var(--border); border-radius: 10px;
   font-size: 1.25rem; font-weight: 600; text-align: center; cursor: pointer;
   background: #FAFAFA; color: var(--text); transition: all 0.15s; user-select: none;
+  -webkit-appearance: none; appearance: none; touch-action: manipulation;
+  font-family: inherit; width: 100%; box-sizing: border-box; line-height: 1.2;
 }
-.pin-key:active { background: var(--accent); color: #fff; transform: scale(0.96); }
+.pin-key:active, .pin-key:focus { background: var(--accent); color: #fff; transform: scale(0.96); outline: none; }
 .pin-key.del { font-size: 1rem; color: var(--text2); }
+.pin-key.spacer { visibility: hidden; pointer-events: none; border: none; background: transparent; }
 .setup-form { display: none; }
 
 /* ── MAIN APP ── */
@@ -871,13 +874,26 @@ async function loadState(key) {
 // ════════════════════════════════════════════════════════════
 function buildPinPad(padId, bufferName, onComplete) {
   const pad = document.getElementById(padId);
+  if (!pad) { setTimeout(() => buildPinPad(padId, bufferName, onComplete), 50); return; }
   pad.innerHTML = '';
   const keys = ['1','2','3','4','5','6','7','8','9','','0','⌫'];
+  const dotsId = padId.replace('-pad', '-dots');
   keys.forEach(k => {
-    const btn = document.createElement('div');
-    btn.className = 'pin-key' + (k === '⌫' ? ' del' : '') + (k === '' ? ' disabled' : '');
-    btn.textContent = k;
-    if (k !== '') btn.onclick = () => pinKeyPress(k, bufferName, padId.replace('-pad','-dots'), onComplete);
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'pin-key' + (k === '⌫' ? ' del' : '') + (k === '' ? ' spacer' : '');
+    btn.textContent = k || '';
+    btn.setAttribute('aria-label', k === '⌫' ? 'Delete' : k === '' ? '' : k);
+    btn.style.cssText = '-webkit-appearance:none;appearance:none;touch-action:manipulation;cursor:pointer;';
+    if (k !== '') {
+      btn.addEventListener('click', function(e) {
+        e.preventDefault();
+        pinKeyPress(k, bufferName, dotsId, onComplete);
+      });
+    } else {
+      btn.disabled = true;
+      btn.style.visibility = 'hidden';
+    }
     pad.appendChild(btn);
   });
 }
@@ -1816,7 +1832,7 @@ function renderLastWeek() {
   const allKeys = getAllWeekKeys();
   const el = document.getElementById('lastweek-content');
   if (allKeys.length < 2) {
-    el.innerHTML = '<div class="empty"><div class="empty-icon">📅</div><h3>Not enough data yet</h3><p>You need at least 2 weeks of transactions to see last week's performance.</p></div>';
+    el.innerHTML = '<div class="empty"><div class="empty-icon">📅</div><h3>Not enough data yet</h3><p>You need at least 2 weeks of transactions to see last week&#39;s performance.</p></div>';
     return;
   }
 
@@ -2319,7 +2335,11 @@ async function manualSave() {
 // ════════════════════════════════════════════════════════════
 // START
 // ════════════════════════════════════════════════════════════
-init();
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', init);
+} else {
+  init();
+}
 </script>
 </body>
 </html>
