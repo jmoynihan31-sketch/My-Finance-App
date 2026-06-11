@@ -320,7 +320,7 @@ select.form-input { appearance: none; background-image: url("data:image/svg+xml,
       <input class="auth-input" id="setup-name" placeholder="e.g. Alex" type="text">
       <label class="auth-label">Weekly Take-Home Pay ($)</label>
       <input class="auth-input" id="setup-pay" placeholder="1200.00" type="number">
-      <label class="auth-label">Fortnightly Rent ($)</label>
+      <label class="auth-label">Fortnightly Rent ($) — you'll save half each week</label>
       <input class="auth-input" id="setup-rent" placeholder="900.00" type="number">
       <label class="auth-label">Create a 4-digit PIN</label>
       <div class="pin-dots" id="setup-dots">
@@ -449,11 +449,15 @@ select.form-input { appearance: none; background-image: url("data:image/svg+xml,
           <label class="form-label">One-Off Bills This Week ($) <span style="font-size:0.7rem;color:var(--text2);">rego, dentist, etc.</span></label>
           <input class="form-input" id="planner-oneoff" type="number" placeholder="0.00" value="0" oninput="updatePlanner()">
         </div>
-        <div class="form-group">
-          <label class="form-label">Rent Due This Week?</label>
+        <div style="background:#F0F4FF;border-radius:10px;padding:0.85rem;margin-bottom:1rem;border-left:3px solid var(--accent);">
+          <div style="font-size:0.75rem;font-weight:700;color:var(--accent);margin-bottom:0.4rem;">🏠 RENT — Weekly saving strategy</div>
+          <div style="font-size:0.8rem;color:var(--text2);line-height:1.5;margin-bottom:0.6rem;">
+            Half your fortnightly rent (<strong id="rent-half-display">$0</strong>) is set aside <em>every week</em>. On payment weeks the full amount is transferred to your landlord.
+          </div>
+          <label class="form-label" style="margin-bottom:0.3rem;">Is rent due this week (fortnightly payment)?</label>
           <select class="form-input" id="planner-rent" onchange="updatePlanner()">
-            <option value="1">Yes — rent is due this week</option>
-            <option value="0">No — not this week</option>
+            <option value="0">No — saving half this week</option>
+            <option value="1">Yes — paying full rent tonight</option>
           </select>
         </div>
       </div>
@@ -1512,8 +1516,8 @@ function renderPayday() {
   const now = new Date();
   document.getElementById('planner-date').textContent = now.toLocaleDateString('en-AU',{weekday:'long',day:'numeric',month:'long',year:'numeric'});
   document.getElementById('planner-pay').value = state.settings.weeklyPay || '';
-
-  const checks = ['Transfer rent to landlord', 'Move savings target to savings account',
+  const rentDueChecklist = document.getElementById('planner-rent') && document.getElementById('planner-rent').value === '1';
+  const checks = [rentDueChecklist ? 'Transfer full rent (' + fmt(state.settings.rent) + ') to landlord tonight' : 'Move half rent (' + fmt(state.settings.rent/2) + ') to your rent savings pot', 'Move savings target to savings account',
     'Allocate goal contributions to sub-accounts', 'Log all this week\'s transactions',
     'Review last week\'s spending vs budget', 'Check savings goals progress', 'Set spending limit for the week'];
   document.getElementById('planner-checklist').innerHTML = checks.map((c,i) => {
@@ -1531,72 +1535,232 @@ function toggleCheck(i) {
   saveState(); renderPayday();
 }
 
+// track which rows are in edit mode and custom overrides
+let splitEditing = false;
+let splitOverrides = {};
+
+function toggleSplitEdit() {
+  splitEditing = !splitEditing;
+  const btn = document.getElementById('split-edit-btn');
+  if (btn) btn.textContent = splitEditing ? 'Done' : 'Edit';
+  updatePlanner();
+}
+
+function setSplitOverride(key, val) {
+  splitOverrides[key] = parseFloat(val) || 0;
+  state.plannerOverrides = Object.assign({}, splitOverrides);
+  saveStateSync();
+  updatePlanner();
+}
+
+function resetSplitOverrides() {
+  splitOverrides = {};
+  state.plannerOverrides = {};
+  saveStateSync();
+  showToast('Reset to recommended amounts');
+  updatePlanner();
+}
+
+function computeGoalSplit(totalPay) {
+  const activeGoals = state.goals.filter(g => {
+    const st = getGoalStatus(g);
+    return st !== 'COMPLETE' && st !== 'OVERDUE';
+  });
+  if (!activeGoals.length) return [];
+  const s = state.settings;
+  // Rent is always half (weekly accrual), regardless of payment week
+  const weeklyRent = Math.round(s.rent / 2 * 100) / 100;
+  const savingsX = totalPay * s.savingsPct;
+  const oneoff = parseFloat(document.getElementById('planner-oneoff').value) || 0;
+  const spend = Object.values(s.budgets).reduce((a, b) => a + b, 0);
+  const goalBudget = Math.max(0, totalPay - weeklyRent - savingsX - oneoff - spend);
+
+  const goalData = activeGoals.map(g => {
+    const wks = weeksUntil(g.date) || 52;
+    const needed = Math.max(0, (g.target || 0) - (g.saved || 0));
+    const perWk = needed / wks;
+    return { g, wks, needed, perWk };
+  });
+
+  const exactTotal = goalData.reduce((a, d) => a + d.perWk, 0);
+  const scale = exactTotal > 0 ? Math.min(goalBudget / exactTotal, 1) : 1;
+
+  return goalData.map(d => ({
+    ...d,
+    allocated: Math.round(d.perWk * scale * 100) / 100,
+    funded: scale >= 1,
+  }));
+}
+
 function updatePlanner() {
-  const pay     = parseFloat(document.getElementById('planner-pay').value)||0;
-  const extra   = parseFloat(document.getElementById('planner-extra').value)||0;
-  const oneoff  = parseFloat(document.getElementById('planner-oneoff').value)||0;
+  const pay = parseFloat(document.getElementById('planner-pay').value) || 0;
+  const extra = parseFloat(document.getElementById('planner-extra').value) || 0;
+  const oneoff = parseFloat(document.getElementById('planner-oneoff').value) || 0;
   const rentDue = document.getElementById('planner-rent').value === '1';
-  const s       = state.settings;
-  const total   = pay + extra;
+  const s = state.settings;
+  const total = pay + extra;
   if (!total) return;
 
-  const rent       = rentDue ? s.rent : 0;
-  const savingsXfer= total * s.savingsPct;
-  const goalTotal  = state.goals.filter(g => g.status !== 'COMPLETE').reduce((a,g) => {
-    const wks = weeksUntil(g.date); const needed = (g.target||0) - (g.saved||0);
-    return a + (wks > 0 ? needed/wks : needed > 0 ? needed : 0);
-  }, 0);
+  if (state.plannerOverrides && Object.keys(splitOverrides).length === 0) {
+    splitOverrides = Object.assign({}, state.plannerOverrides);
+  }
 
-  const fixed = rent + savingsXfer + goalTotal + oneoff;
-  const spend = Object.values(s.budgets).reduce((a,b)=>a+b,0);
-  const leftover = Math.max(0, total - fixed - spend);
+  // Weekly rent accrual — always half the fortnightly amount
+  const weeklyRentAmt = Math.round(s.rent / 2 * 100) / 100;
+  // On payment weeks, we also flag the full transfer out
+  const rentPaymentAmt = rentDue ? s.rent : 0;
+  const defRent = weeklyRentAmt;
+  const defSavings = Math.round(total * s.savingsPct * 100) / 100;
+  // Update the hint display
+  const rhd = document.getElementById('rent-half-display');
+  if (rhd) rhd.textContent = fmt(weeklyRentAmt);
+  const goalSplit = computeGoalSplit(total);
+  const defGoals = Math.round(goalSplit.reduce((a, d) => a + d.allocated, 0) * 100) / 100;
 
-  const splitSection = document.getElementById('planner-split');
-  splitSection.style.display = 'block';
+  const get = (key, def) => splitOverrides[key] !== undefined ? splitOverrides[key] : def;
+
+  const rent = get('rent', defRent);
+  const savingsXfer = get('savings', defSavings);
+  const goalTotal = get('goals', defGoals);
+  const groceries = get('groceries', s.budgets['Groceries & Supermarket'] || 0);
+  const dining = get('dining', s.budgets['Dining & Takeaway'] || 0);
+  const transport = get('transport', s.budgets['Transport & Fuel'] || 0);
+  const bills = get('bills', s.budgets['Utilities & Bills'] || 0);
+  const misc = get('misc', s.budgets['Miscellaneous'] || 0);
+
+  const allocated = rent + savingsXfer + goalTotal + oneoff + groceries + dining + transport + bills + misc;
+  const leftover = Math.max(0, total - allocated);
+
+  document.getElementById('planner-split').style.display = 'block';
 
   const rows = [
-    ['🔴 Rent', rent, 'Pay landlord tonight'],
-    ['🟣 Savings transfer', savingsXfer, 'Move to savings now'],
-    ['🟡 Goal savings', goalTotal, 'Spread across goal accounts'],
-    ['🟠 One-off bills', oneoff, 'Pay/set aside tonight'],
-    ['🟢 Groceries', s.budgets['Groceries & Supermarket']||0, 'Shop with a list'],
-    ['🔵 Dining & Takeaway', s.budgets['Dining & Takeaway']||0, 'Limit to 2x per week'],
-    ['⛽ Transport', s.budgets['Transport & Fuel']||0, 'Fuel & travel'],
-    ['💡 Bills buffer', s.budgets['Utilities & Bills']||0, 'Accrue for bills'],
-    ['📦 Other spending', s.budgets['Miscellaneous']||0, 'Buffer'],
+    { key: 'rent',      icon: '🏠', label: 'Rent set-aside (weekly)', val: rent, note: rentDue ? 'Saving half + paying full amount tonight' : 'Saving half now — payment due next week', locked: true },
+    { key: 'savings',   icon: '🟣', label: 'Savings transfer',  val: savingsXfer, note: 'Move to savings account', locked: false },
+    { key: 'goals',     icon: '🎯', label: 'Goal savings',      val: goalTotal,   note: 'See breakdown below',     locked: false },
+    { key: 'oneoff',    icon: '🟠', label: 'One-off bills',     val: oneoff,      note: 'As entered above',        locked: true },
+    { key: 'groceries', icon: '🟢', label: 'Groceries',         val: groceries,   note: 'Shop with a list',        locked: false },
+    { key: 'dining',    icon: '🔵', label: 'Dining & Takeaway', val: dining,      note: 'Limit to 2x per week',    locked: false },
+    { key: 'transport', icon: '⛽', label: 'Transport & Fuel',  val: transport,   note: 'Petrol & travel',         locked: false },
+    { key: 'bills',     icon: '💡', label: 'Bills buffer',      val: bills,       note: 'Accrue for next bill',    locked: false },
+    { key: 'misc',      icon: '📦', label: 'Miscellaneous',     val: misc,        note: 'Flexible buffer',         locked: false },
   ];
 
-  document.getElementById('planner-rows').innerHTML = rows.map(([label, amt, note]) =>
-    `<div class="planner-row">
-      <div>
-        <div class="planner-label">${label}</div>
-        <div style="font-size:0.7rem;color:var(--text2);">${note}</div>
-      </div>
-      <div style="text-align:right;">
-        <span class="planner-amount">${fmt(amt)}</span>
-        <span class="planner-pct">${total > 0 ? (amt/total*100).toFixed(0)+'%' : ''}</span>
-      </div>
-    </div>`
-  ).join('');
+  // Rent due this week — inject a prominent payment notice at top
+  const rentDueNotice = rentDue ? '<div style="background:var(--red);color:#fff;border-radius:10px;padding:0.85rem;margin-bottom:0.75rem;display:flex;justify-content:space-between;align-items:center;">' +
+    '<div>' +
+      '<div style="font-size:0.85rem;font-weight:800;">🏠 Rent Payment Due Tonight</div>' +
+      '<div style="font-size:0.75rem;opacity:0.85;margin-top:0.15rem;">Transfer full fortnightly rent to landlord</div>' +
+    '</div>' +
+    '<div style="font-size:1.1rem;font-weight:800;">' + fmt(rentPaymentAmt) + '</div>' +
+  '</div>' : '<div style="background:#EEF4FF;border-radius:10px;padding:0.75rem;margin-bottom:0.75rem;display:flex;justify-content:space-between;align-items:center;">' +
+    '<div>' +
+      '<div style="font-size:0.85rem;font-weight:700;color:var(--accent);">🏠 Rent Accrual Week</div>' +
+      '<div style="font-size:0.75rem;color:var(--text2);margin-top:0.1rem;">Set aside half now — rent due in ' + (rentDue ? '0' : '1') + ' week</div>' +
+    '</div>' +
+    '<div style="text-align:right;">' +
+      '<div style="font-size:0.9rem;font-weight:800;color:var(--accent);">' + fmt(weeklyRentAmt) + ' saved</div>' +
+      '<div style="font-size:0.7rem;color:var(--text2);">Running total: ' + fmt(weeklyRentAmt) + ' of ' + fmt(s.rent) + '</div>' +
+    '</div>' +
+  '</div>';
+
+  document.getElementById('planner-rows').innerHTML = rentDueNotice + rows.map(row => {
+    const pct = total > 0 ? (row.val / total * 100).toFixed(0) : 0;
+    const isCustom = splitOverrides[row.key] !== undefined;
+    if (splitEditing && !row.locked) {
+      return '<div class="planner-row" style="align-items:flex-start;padding:0.5rem 0;">' +
+        '<div style="flex:1;">' +
+          '<div class="planner-label">' + row.icon + ' ' + row.label + '</div>' +
+          '<div style="font-size:0.7rem;color:var(--text2);">' + row.note + '</div>' +
+        '</div>' +
+        '<div style="display:flex;align-items:center;gap:0.4rem;margin-top:0.1rem;">' +
+          '<span style="font-size:0.85rem;color:var(--text2);">$</span>' +
+          '<input type="number" value="' + row.val.toFixed(2) + '"' +
+            ' style="width:80px;padding:0.35rem 0.5rem;border:1.5px solid ' + (isCustom ? 'var(--accent)' : 'var(--border)') + ';border-radius:8px;font-size:0.9rem;font-weight:700;text-align:right;background:' + (isCustom ? '#EEF4FF' : '#FAFAFA') + ';"' +
+            ' oninput="setSplitOverride(\'' + row.key + '\', this.value)">' +
+          '<span style="font-size:0.7rem;color:var(--text2);width:28px;text-align:right;">' + pct + '%</span>' +
+        '</div>' +
+      '</div>';
+    }
+    const customBadge = isCustom ? ' <span style="font-size:0.65rem;background:#EEF4FF;color:var(--accent);padding:0.1rem 0.3rem;border-radius:4px;font-weight:700;vertical-align:middle;">edited</span>' : '';
+    return '<div class="planner-row">' +
+      '<div>' +
+        '<div class="planner-label">' + row.icon + ' ' + row.label + customBadge + '</div>' +
+        '<div style="font-size:0.7rem;color:var(--text2);">' + row.note + '</div>' +
+      '</div>' +
+      '<div style="text-align:right;">' +
+        '<span class="planner-amount">' + fmt(row.val) + '</span>' +
+        '<span class="planner-pct">' + pct + '%</span>' +
+      '</div>' +
+    '</div>';
+  }).join('') + (splitEditing ?
+    '<div style="margin-top:0.75rem;text-align:center;">' +
+      '<button onclick="resetSplitOverrides()" style="font-size:0.75rem;color:var(--text2);background:none;border:1px solid var(--border);border-radius:6px;padding:0.3rem 0.8rem;cursor:pointer;">Reset to recommended</button>' +
+    '</div>' : '');
+
   document.getElementById('planner-leftover').textContent = fmt(leftover);
 
-  // Habits
-  const wks = Math.max(new Set(state.transactions.map(t => weekNum(t.date))).size, 1);
+  // ── Goal split recommendation panel ──
+  const activeGoals = goalSplit.filter(d => d.needed > 0);
+  const goalSecEl = document.getElementById('planner-goals-section');
+  if (activeGoals.length) {
+    goalSecEl.style.display = 'block';
+    const canFundAll = goalSplit.every(d => d.funded);
+    const totalAlloc = goalSplit.reduce((a, d) => a + d.allocated, 0);
+    document.getElementById('planner-goal-rows').innerHTML =
+      '<div style="font-size:0.8rem;margin-bottom:0.6rem;">' +
+        (canFundAll
+          ? '<span style="color:var(--green);font-weight:700;">✅ You can fully fund all goals this week</span>'
+          : '<span style="color:var(--orange);font-weight:700;">⚠️ Budget tight — split proportionally by urgency</span>') +
+      '</div>' +
+      activeGoals.map(d => {
+        const g = d.g;
+        const pct2 = Math.min(100, ((g.saved || 0) / g.target) * 100).toFixed(0);
+        const urgLabel = d.wks <= 4 ? '🔥 Urgent' : d.wks <= 12 ? '⚡ Soon' : '📅 Planned';
+        const colr = d.wks <= 4 ? 'var(--red)' : d.wks <= 12 ? 'var(--orange)' : 'var(--green)';
+        return '<div style="background:#FAFAFA;border-radius:10px;padding:0.75rem;margin-bottom:0.5rem;border-left:3px solid ' + colr + ';">' +
+          '<div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:0.4rem;">' +
+            '<div>' +
+              '<div style="font-size:0.875rem;font-weight:700;">' + g.name + '</div>' +
+              '<div style="font-size:0.7rem;color:var(--text2);margin-top:0.1rem;">' + urgLabel + ' · ' + d.wks + ' wks left · ' + pct2 + '% saved</div>' +
+            '</div>' +
+            '<div style="text-align:right;">' +
+              '<div style="font-size:1rem;font-weight:800;color:' + colr + ';">' + fmt(d.allocated) + '<span style="font-size:0.7rem;">/wk</span></div>' +
+              '<div style="font-size:0.7rem;color:var(--text2);">' + fmt(d.needed) + ' still needed</div>' +
+            '</div>' +
+          '</div>' +
+          '<div style="background:#eee;border-radius:20px;height:5px;overflow:hidden;">' +
+            '<div style="width:' + pct2 + '%;height:100%;background:' + colr + ';border-radius:20px;"></div>' +
+          '</div>' +
+        '</div>';
+      }).join('') +
+      '<div style="display:flex;justify-content:space-between;padding:0.5rem 0;border-top:1px solid #f0f0f0;margin-top:0.25rem;">' +
+        '<span style="font-size:0.8rem;font-weight:700;color:var(--text2);">Total goal allocation</span>' +
+        '<span style="font-size:0.9rem;font-weight:800;">' + fmt(totalAlloc) + '/wk</span>' +
+      '</div>';
+  } else {
+    goalSecEl.style.display = 'none';
+  }
+
+  // ── Habits ──
+  const allWeekKeys = getAllWeekKeys();
+  const wkCount = Math.max(allWeekKeys.length, 1);
   const catTotals = {};
-  state.transactions.forEach(t => { if(t.debit>0) catTotals[t.category] = (catTotals[t.category]||0) + t.debit; });
-  const habitCats = ['Groceries & Supermarket','Dining & Takeaway','Transport & Fuel','Entertainment & Subs','Miscellaneous'];
+  state.transactions.forEach(t => { if (t.debit > 0) catTotals[t.category] = (catTotals[t.category] || 0) + t.debit; });
+  const habitCats = ['Groceries & Supermarket', 'Dining & Takeaway', 'Transport & Fuel', 'Entertainment & Subs', 'Miscellaneous'];
   document.getElementById('planner-habit-rows').innerHTML = habitCats.map(cat => {
-    const avg = (catTotals[cat]||0) / wks;
-    const bud = s.budgets[cat]||0;
-    const over = avg > bud;
-    return `<div class="planner-row">
-      <span style="font-size:0.875rem;">${catInfo(cat).icon} ${cat}</span>
-      <span style="font-size:0.875rem;font-weight:700;color:${over?'var(--red)':'var(--green)'};">${fmt(avg)}/wk ${over?'⚠️':'✅'}</span>
-    </div>`;
+    const avg = (catTotals[cat] || 0) / wkCount;
+    const bud = s.budgets[cat] || 0;
+    const over = bud > 0 && avg > bud;
+    return '<div class="planner-row">' +
+      '<div>' +
+        '<span style="font-size:0.875rem;">' + catInfo(cat).icon + ' ' + cat + '</span>' +
+        '<div style="font-size:0.7rem;color:var(--text2);">Budget: ' + fmt(bud) + '/wk</div>' +
+      '</div>' +
+      '<span style="font-size:0.875rem;font-weight:700;color:' + (over ? 'var(--red)' : 'var(--green)') + ';">' + fmt(avg) + '/wk ' + (over ? '⚠️' : '✅') + '</span>' +
+    '</div>';
   }).join('');
   document.getElementById('planner-habits').style.display = 'block';
 }
-
 // ════════════════════════════════════════════════════════════
 // GOALS
 // ════════════════════════════════════════════════════════════
@@ -1617,7 +1781,7 @@ function renderGoals() {
     const wks = weeksUntil(g.date); const needed = (g.target||0) - (g.saved||0);
     return a + (wks > 0 ? needed/wks : 0);
   }, 0);
-  const affordable = s.weeklyPay - (s.rent/2) - (s.weeklyPay*s.savingsPct) - totalGoalPerWk >= 0;
+  const affordable = s.weeklyPay - (s.rent/2) - (s.weeklyPay*s.savingsPct) - totalGoalPerWk >= 0; // rent/2 = weekly accrual
   document.getElementById('goals-affordability').innerHTML = `
     <div class="card-title">Affordability Check</div>
     <div style="display:flex;justify-content:space-between;margin-bottom:0.5rem;">
