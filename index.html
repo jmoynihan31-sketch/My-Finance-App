@@ -463,9 +463,10 @@ select.form-input { appearance: none; background-image: url("data:image/svg+xml,
       </div>
 
       <div class="planner-section" id="planner-split" style="display:none;">
-        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:0.75rem;">
-          <div style="font-size:0.8rem;font-weight:700;color:var(--text2);text-transform:uppercase;letter-spacing:0.06em;">📊 Your Pay Split</div>
-          <button onclick="toggleSplitEdit()" id="split-edit-btn" style="font-size:0.75rem;font-weight:700;color:var(--accent);background:none;border:1.5px solid var(--accent);border-radius:6px;padding:0.2rem 0.6rem;cursor:pointer;">Edit</button>
+        <div style="position:relative;margin-bottom:0.75rem;min-height:28px;">
+          <div style="font-size:0.8rem;font-weight:700;color:var(--text2);text-transform:uppercase;letter-spacing:0.06em;line-height:28px;">📊 Your Pay Split</div>
+          <button onclick="toggleSplitEdit()" id="split-edit-btn"
+            style="-webkit-appearance:none;appearance:none;position:absolute;top:0;right:0;font-size:0.8rem;font-weight:700;color:var(--accent);background:#EEF4FF;border:1.5px solid var(--accent);border-radius:8px;padding:0.3rem 0.85rem;cursor:pointer;line-height:1.4;min-width:52px;text-align:center;touch-action:manipulation;">Edit</button>
         </div>
         <div id="planner-rows"></div>
         <div class="planner-total">
