@@ -1744,7 +1744,7 @@ function updatePlanner() {
   const rows = [
     { key: 'rent',      icon: '🏠', label: 'Rent set-aside (weekly)', val: rent, note: rentDue ? 'Saving half + paying full amount tonight' : 'Saving half now — payment due next week', locked: true },
     { key: 'savings',   icon: '🟣', label: 'Savings transfer',  val: savingsXfer, note: 'Move to savings account', locked: false },
-    { key: 'goals',     icon: '🎯', label: 'Goal savings',      val: goalTotal,   note: 'See breakdown below',     locked: false },
+    { key: 'goals',     icon: '🎯', label: 'Goal savings',      val: goalTotal,   note: 'goalBreakdown',           locked: false },
     { key: 'oneoff',    icon: '🟠', label: 'One-off bills',     val: oneoff,      note: 'As entered above',        locked: true },
     { key: 'groceries', icon: '🟢', label: 'Groceries',         val: groceries,   note: 'Shop with a list',        locked: false },
     { key: 'dining',    icon: '🔵', label: 'Dining & Takeaway', val: dining,      note: 'Limit to 2x per week',    locked: false },
@@ -1776,7 +1776,10 @@ function updatePlanner() {
     const isCustom = splitOverrides[row.key] !== undefined && !row.locked;
     if (splitEditing && !row.locked) {
       const inputId = 'split-input-' + row.key;
-      return '<div class="planner-row" style="align-items:center;padding:0.6rem 0;">' +
+      // Goals row in edit mode — show total % input + per-goal breakdown beneath
+      const isGoalsRow = row.note === 'goalBreakdown';
+      const editBase = '<div style="' + (isGoalsRow ? 'border-bottom:1px solid #f0f0f0;padding-bottom:0.5rem;margin-bottom:0.25rem;' : '') + '">' +
+        '<div class="planner-row" style="align-items:center;padding:0.6rem 0;">' +
         '<div style="flex:1;">' +
           '<div class="planner-label">' + row.icon + ' ' + row.label + '</div>' +
           '<div style="font-size:0.7rem;color:var(--text2);">' + fmt(row.val) + '</div>' +
@@ -1790,8 +1793,82 @@ function updatePlanner() {
           '<span style="font-size:0.9rem;font-weight:700;color:var(--text2);">%</span>' +
         '</div>' +
       '</div>';
+      if (isGoalsRow) {
+        const activeGoalRows = goalSplit.filter(d => d.needed > 0);
+        const goalSubEdit = activeGoalRows.length ? activeGoalRows.map(d => {
+          const g = d.g;
+          const urgColor = d.wks <= 4 ? 'var(--red)' : d.wks <= 12 ? 'var(--orange)' : 'var(--green)';
+          const urgIcon  = d.wks <= 4 ? '🔥' : d.wks <= 12 ? '⚡' : '📅';
+          const gAmt = total > 0 ? fmt(d.allocated) : '$0.00';
+          const gPct = total > 0 ? (d.allocated / total * 100).toFixed(1) : '0.0';
+          return '<div style="display:flex;align-items:center;justify-content:space-between;' +
+                 'padding:0.4rem 0.6rem 0.4rem 1rem;border-left:2px solid ' + urgColor + ';' +
+                 'margin:0.25rem 0;background:#FAFAFA;border-radius:0 8px 8px 0;">' +
+            '<div style="flex:1;min-width:0;">' +
+              '<div style="font-size:0.8rem;font-weight:700;">' + urgIcon + ' ' + g.name + '</div>' +
+              '<div style="font-size:0.68rem;color:var(--text2);">' + d.wks + ' wks left</div>' +
+            '</div>' +
+            '<div style="text-align:right;">' +
+              '<div style="font-size:0.85rem;font-weight:800;color:' + urgColor + ';">' + gAmt + '</div>' +
+              '<div style="font-size:0.68rem;color:var(--text2);">' + gPct + '%</div>' +
+            '</div>' +
+          '</div>';
+        }).join('') : '<div style="font-size:0.75rem;color:var(--text2);padding:0.3rem 0.75rem;font-style:italic;">No active goals</div>';
+        return editBase + goalSubEdit + '</div>';
+      }
+      return editBase + '</div>';
     }
     const customBadge = isCustom ? ' <span style="font-size:0.65rem;background:#EEF4FF;color:var(--accent);padding:0.1rem 0.3rem;border-radius:4px;font-weight:700;vertical-align:middle;">edited</span>' : '';
+    // ── Goal savings row — render inline goal breakdown as subsection ──
+    if (row.note === 'goalBreakdown') {
+      const activeGoalRows = goalSplit.filter(d => d.needed > 0);
+      const canFundAll = goalSplit.every(d => d.funded);
+      const goalSubrows = activeGoalRows.length ? activeGoalRows.map(d => {
+        const g = d.g;
+        const gPct = total > 0 ? (d.allocated / total * 100).toFixed(1) : '0.0';
+        const savedPct = Math.min(100, ((g.saved || 0) / g.target) * 100).toFixed(0);
+        const urgColor = d.wks <= 4 ? 'var(--red)' : d.wks <= 12 ? 'var(--orange)' : 'var(--green)';
+        const urgIcon  = d.wks <= 4 ? '🔥' : d.wks <= 12 ? '⚡' : '📅';
+        return '<div style="display:flex;align-items:center;justify-content:space-between;' +
+               'padding:0.45rem 0.6rem 0.45rem 1rem;border-left:2px solid ' + urgColor + ';' +
+               'margin:0.3rem 0;background:#FAFAFA;border-radius:0 8px 8px 0;">' +
+          '<div style="flex:1;min-width:0;">' +
+            '<div style="font-size:0.8rem;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">' + urgIcon + ' ' + g.name + '</div>' +
+            '<div style="font-size:0.68rem;color:var(--text2);margin-top:0.1rem;">' +
+              d.wks + ' wks · ' + savedPct + '% saved · ' + fmt(d.needed) + ' needed' +
+            '</div>' +
+            '<div style="background:#e8e8e8;border-radius:20px;height:3px;margin-top:0.3rem;overflow:hidden;">' +
+              '<div style="width:' + savedPct + '%;height:100%;background:' + urgColor + ';border-radius:20px;"></div>' +
+            '</div>' +
+          '</div>' +
+          '<div style="text-align:right;margin-left:0.75rem;flex-shrink:0;">' +
+            '<div style="font-size:0.9rem;font-weight:800;color:' + urgColor + ';">' + fmt(d.allocated) + '</div>' +
+            '<div style="font-size:0.68rem;color:var(--text2);">' + gPct + '% of pay</div>' +
+          '</div>' +
+        '</div>';
+      }).join('') : '<div style="font-size:0.75rem;color:var(--text2);padding:0.4rem 0.75rem;font-style:italic;">No active goals — add goals to see breakdown</div>';
+
+      const fundingNote = activeGoalRows.length
+        ? (canFundAll
+            ? '<span style="color:var(--green);font-size:0.7rem;font-weight:700;">✅ Fully funded</span>'
+            : '<span style="color:var(--orange);font-size:0.7rem;font-weight:700;">⚠️ Scaled by urgency</span>')
+        : '';
+
+      return '<div style="border-bottom:1px solid #f0f0f0;padding-bottom:0.5rem;margin-bottom:0.25rem;">' +
+        '<div class="planner-row" style="padding-bottom:0.3rem;">' +
+          '<div>' +
+            '<div class="planner-label">🎯 Goal savings' + customBadge + '</div>' +
+            '<div style="font-size:0.7rem;color:var(--text2);">Split across all active goals</div>' +
+          '</div>' +
+          '<div style="text-align:right;">' +
+            '<span class="planner-amount">' + fmt(row.val) + '</span>' +
+            '<span class="planner-pct">' + pct + '%</span>' +
+          '</div>' +
+        '</div>' +
+        '<div style="margin-top:0.15rem;">' + fundingNote + '</div>' +
+        goalSubrows +
+      '</div>';
+    }
     return '<div class="planner-row">' +
       '<div>' +
         '<div class="planner-label">' + row.icon + ' ' + row.label + customBadge + '</div>' +
@@ -1809,47 +1886,10 @@ function updatePlanner() {
 
   document.getElementById('planner-leftover').textContent = fmt(leftover);
 
-  // ── Goal split recommendation panel ──
-  const activeGoals = goalSplit.filter(d => d.needed > 0);
+  // Goal breakdown is now rendered inline inside the pay split rows above.
+  // Hide the separate panel (kept in HTML for backwards compat).
   const goalSecEl = document.getElementById('planner-goals-section');
-  if (activeGoals.length) {
-    goalSecEl.style.display = 'block';
-    const canFundAll = goalSplit.every(d => d.funded);
-    const totalAlloc = goalSplit.reduce((a, d) => a + d.allocated, 0);
-    document.getElementById('planner-goal-rows').innerHTML =
-      '<div style="font-size:0.8rem;margin-bottom:0.6rem;">' +
-        (canFundAll
-          ? '<span style="color:var(--green);font-weight:700;">✅ You can fully fund all goals this week</span>'
-          : '<span style="color:var(--orange);font-weight:700;">⚠️ Budget tight — split proportionally by urgency</span>') +
-      '</div>' +
-      activeGoals.map(d => {
-        const g = d.g;
-        const pct2 = Math.min(100, ((g.saved || 0) / g.target) * 100).toFixed(0);
-        const urgLabel = d.wks <= 4 ? '🔥 Urgent' : d.wks <= 12 ? '⚡ Soon' : '📅 Planned';
-        const colr = d.wks <= 4 ? 'var(--red)' : d.wks <= 12 ? 'var(--orange)' : 'var(--green)';
-        return '<div style="background:#FAFAFA;border-radius:10px;padding:0.75rem;margin-bottom:0.5rem;border-left:3px solid ' + colr + ';">' +
-          '<div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:0.4rem;">' +
-            '<div>' +
-              '<div style="font-size:0.875rem;font-weight:700;">' + g.name + '</div>' +
-              '<div style="font-size:0.7rem;color:var(--text2);margin-top:0.1rem;">' + urgLabel + ' · ' + d.wks + ' wks left · ' + pct2 + '% saved</div>' +
-            '</div>' +
-            '<div style="text-align:right;">' +
-              '<div style="font-size:1rem;font-weight:800;color:' + colr + ';">' + fmt(d.allocated) + '<span style="font-size:0.7rem;">/wk</span></div>' +
-              '<div style="font-size:0.7rem;color:var(--text2);">' + fmt(d.needed) + ' still needed</div>' +
-            '</div>' +
-          '</div>' +
-          '<div style="background:#eee;border-radius:20px;height:5px;overflow:hidden;">' +
-            '<div style="width:' + pct2 + '%;height:100%;background:' + colr + ';border-radius:20px;"></div>' +
-          '</div>' +
-        '</div>';
-      }).join('') +
-      '<div style="display:flex;justify-content:space-between;padding:0.5rem 0;border-top:1px solid #f0f0f0;margin-top:0.25rem;">' +
-        '<span style="font-size:0.8rem;font-weight:700;color:var(--text2);">Total goal allocation</span>' +
-        '<span style="font-size:0.9rem;font-weight:800;">' + fmt(totalAlloc) + '/wk</span>' +
-      '</div>';
-  } else {
-    goalSecEl.style.display = 'none';
-  }
+  if (goalSecEl) goalSecEl.style.display = 'none';
 
   // ── Habits ──
   const allWeekKeys = getAllWeekKeys();
