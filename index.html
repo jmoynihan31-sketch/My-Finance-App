@@ -463,7 +463,10 @@ select.form-input { appearance: none; background-image: url("data:image/svg+xml,
       </div>
 
       <div class="planner-section" id="planner-split" style="display:none;">
-        <div style="font-size:0.8rem;font-weight:700;color:var(--text2);text-transform:uppercase;letter-spacing:0.06em;margin-bottom:0.75rem;">📊 Your Pay Split</div>
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:0.75rem;">
+          <div style="font-size:0.8rem;font-weight:700;color:var(--text2);text-transform:uppercase;letter-spacing:0.06em;">📊 Your Pay Split</div>
+          <button onclick="toggleSplitEdit()" id="split-edit-btn" style="font-size:0.75rem;font-weight:700;color:var(--accent);background:none;border:1.5px solid var(--accent);border-radius:6px;padding:0.2rem 0.6rem;cursor:pointer;">Edit</button>
+        </div>
         <div id="planner-rows"></div>
         <div class="planner-total">
           <span style="font-size:0.85rem;font-weight:700;">Leftover → Savings</span>
