@@ -1046,66 +1046,89 @@ function processCSVFile(file) {
 function parseBendigoCSV(text) {
   const lines = text.trim().split(/\r?\n/);
   const results = [];
-  if (lines.length < 2) return results;
+  if (lines.length < 1) return results;
 
-  // Detect header and format by inspecting first row
-  const header = parseCSVLine(lines[0]).map(c => c.replace(/"/g,'').trim().toLowerCase());
-  const dataStart = header.some(h => h.includes('date') || h.includes('amount') || h.includes('debit')) ? 1 : 0;
+  // ── Detect Bendigo format by inspecting first data row ──────────────────
+  // Bendigo Extended (no header row) format:
+  // col0: Account number  e.g. "633-000 171774979"
+  // col1: Date            e.g. "10/06/2026"
+  // col2: Transaction code e.g. "TCR06"
+  // col3: Amount (signed) e.g. "15.00" or "-10.00"
+  // col4: Transaction type e.g. "RETAIL PURCHASE" or "E-BANKING TRANSFER"
+  // col5: Merchant/Description e.g. "COLES SUPERMARKET, SYDNEY"
+  // col6: Reference       e.g. "0906 AUD000000001000"
 
-  // Determine column indices from header (or guess from data)
-  let iDate = -1, iDesc = -1, iDebit = -1, iCredit = -1, iAmount = -1;
+  // Detect if first row is a header
+  const firstCols = parseCSVLine(lines[0]).map(c => c.replace(/"/g,'').trim().toLowerCase());
+  const hasHeader = firstCols.some(h => h === 'date' || h === 'amount' || h === 'description' || h === 'debit');
+  const dataStart = hasHeader ? 1 : 0;
 
-  // Try to match header columns
-  header.forEach((h, i) => {
-    if (h.includes('date')) iDate = i;
-    else if (h.includes('description') || h.includes('narration') || h.includes('transaction') || h.includes('particulars') || h.includes('details') || h.includes('reference') || h.includes('memo')) iDesc = i;
-    else if (h.includes('debit') || h === 'withdrawal' || h === 'out') iDebit = i;
-    else if (h.includes('credit') || h === 'deposit' || h === 'in') iCredit = i;
-    else if (h === 'amount' || h === 'value') iAmount = i;
-  });
-
-  // Bendigo Extended: "Date","Amount","Description","Balance"
-  // If we found amount but not debit/credit separately
-  if (iAmount === -1 && iDebit === -1 && iCredit === -1) {
-    // Guess: col0=date, col1=amount(signed), col2=desc
-    iDate = 0; iAmount = 1; iDesc = 2;
-  }
-  if (iDate === -1) iDate = 0;
-  if (iDesc === -1) {
-    // Pick the column with longest average text
-    iDesc = iAmount !== -1 ? (iAmount === 1 ? 2 : 1) : 1;
-  }
+  // Detect Bendigo no-header format: col0 looks like an account number (contains -)
+  const col0 = firstCols[0] || '';
+  const isBendigoFormat = !hasHeader && (col0.includes('-') || col0.match(/^\d{3}/));
 
   for (let i = dataStart; i < lines.length; i++) {
     const line = lines[i].trim();
     if (!line) continue;
-    const cols = parseCSVLine(line);
-    if (cols.length < 2) continue;
+    const cols = parseCSVLine(line).map(c => c.replace(/"/g,'').trim());
+    if (cols.length < 4) continue;
 
-    const rawDate = (cols[iDate] || '').replace(/"/g,'').trim();
-    if (!rawDate.match(/\d/)) continue;
-    const date = normaliseDate(rawDate);
-    if (!date) continue;
+    let date = '', desc = '', debit = 0, credit = 0;
 
-    const desc = (cols[iDesc] || '').replace(/"/g,'').trim();
-    if (!desc) continue;
-
-    let debit = 0, credit = 0;
-
-    if (iDebit !== -1 && iCredit !== -1) {
-      // Separate debit/credit columns
-      debit  = Math.abs(parseFloat((cols[iDebit]  || '').replace(/[^0-9.-]/g,'')) || 0);
-      credit = Math.abs(parseFloat((cols[iCredit] || '').replace(/[^0-9.-]/g,'')) || 0);
-    } else {
-      // Single signed amount column
-      const amtCol = iAmount !== -1 ? iAmount : 1;
-      const raw = (cols[amtCol] || '').replace(/[^0-9.-]/g,'');
-      const amt = parseFloat(raw) || 0;
+    if (isBendigoFormat && cols.length >= 6) {
+      // Bendigo Extended no-header format
+      // col1 = date, col3 = amount, col5 = merchant description
+      date = normaliseDate(cols[1]);
+      const amt = parseFloat(cols[3].replace(/[^0-9.-]/g,'')) || 0;
       if (amt < 0) debit = Math.abs(amt);
       else credit = amt;
+      // col5 = merchant name for RETAIL PURCHASE, but reference number for transfers
+      // If col5 looks like a number/reference, use col4 (transaction type) instead
+      const rawDesc5 = cols[5] || '';
+      const looksLikeRef = /^[\d\s]+$/.test(rawDesc5) || rawDesc5.length < 4;
+      if (looksLikeRef) {
+        // Transfer/payment — use type + reference for clarity
+        desc = cols[4] || '';
+        if (cols[6] && cols[6].length > 2) desc = cols[4] + ' ' + cols[5];
+      } else {
+        desc = rawDesc5;
+        // Clean up trailing AUD reference codes e.g. ", 0906 AUD000000001000"
+        desc = desc.replace(/,?\s*\d{4}\s+AUD\d+$/i, '').trim();
+      }
+      if (!desc) desc = cols[4] || '';
+
+    } else if (hasHeader) {
+      // Header-based format — map by column position detected from header
+      const hdr = firstCols;
+      let iDate = hdr.findIndex(h => h.includes('date'));
+      let iAmt  = hdr.findIndex(h => h === 'amount' || h === 'value');
+      let iDeb  = hdr.findIndex(h => h.includes('debit') || h === 'withdrawal');
+      let iCred = hdr.findIndex(h => h.includes('credit') || h === 'deposit');
+      let iDesc = hdr.findIndex(h => h.includes('description') || h.includes('narration') || h.includes('particulars') || h.includes('memo'));
+      if (iDate === -1) iDate = 0;
+      if (iDesc === -1) iDesc = iAmt !== -1 ? (iAmt + 1) : 2;
+      date = normaliseDate(cols[iDate] || '');
+      desc = cols[iDesc] || '';
+      if (iDeb !== -1 && iCred !== -1) {
+        debit  = Math.abs(parseFloat((cols[iDeb]  || '').replace(/[^0-9.-]/g,'')) || 0);
+        credit = Math.abs(parseFloat((cols[iCred] || '').replace(/[^0-9.-]/g,'')) || 0);
+      } else {
+        const amtCol = iAmt !== -1 ? iAmt : 1;
+        const amt = parseFloat((cols[amtCol] || '').replace(/[^0-9.-]/g,'')) || 0;
+        if (amt < 0) debit = Math.abs(amt);
+        else credit = amt;
+      }
+
+    } else {
+      // Unknown format — best guess: col0=date, col1=amount, col2=desc
+      date = normaliseDate(cols[0] || '');
+      const amt = parseFloat((cols[1] || '').replace(/[^0-9.-]/g,'')) || 0;
+      if (amt < 0) debit = Math.abs(amt);
+      else credit = amt;
+      desc = cols[2] || '';
     }
 
-    // Skip rows where both are 0 and no description
+    if (!date || !desc) continue;
     if (debit === 0 && credit === 0) continue;
 
     const category = autoCategory(desc);
