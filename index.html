@@ -450,7 +450,7 @@ select.form-input { appearance: none; background-image: url("data:image/svg+xml,
         <div style="font-size:0.8rem;font-weight:700;color:var(--text2);text-transform:uppercase;letter-spacing:0.06em;margin-bottom:0.75rem;">📥 This Week's Pay</div>
         <div class="form-group">
           <label class="form-label">Actual Pay Received ($)</label>
-          <input class="form-input" id="planner-pay" type="number" placeholder="1200.00" oninput="updatePlanner()">
+          <input class="form-input" id="planner-pay" type="number" placeholder="1200.00" oninput="onPayChange()">
         </div>
         <div class="form-group">
           <label class="form-label">Extra Income This Week ($)</label>
@@ -1611,8 +1611,18 @@ function toggleSplitEdit() {
 }
 
 function setSplitOverride(key, val) {
-  splitOverrides[key] = parseFloat(val) || 0;
-  state.plannerOverrides = Object.assign({}, splitOverrides);
+  const pay = (parseFloat(document.getElementById('planner-pay').value) || 0) +
+              (parseFloat(document.getElementById('planner-extra').value) || 0);
+  const dollarVal = parseFloat(val) || 0;
+  // Store as fraction of total pay so it scales when pay changes
+  // For fixed items (rent, oneoff) store raw dollar value instead
+  const fixedKeys = ['rent', 'oneoff'];
+  if (fixedKeys.includes(key) || pay === 0) {
+    splitOverrides[key] = { fixed: dollarVal };
+  } else {
+    splitOverrides[key] = { pct: dollarVal / pay };
+  }
+  state.plannerOverrides = JSON.parse(JSON.stringify(splitOverrides));
   saveStateSync();
   updatePlanner();
 }
@@ -1623,6 +1633,16 @@ function resetSplitOverrides() {
   saveStateSync();
   showToast('Reset to recommended amounts');
   updatePlanner();
+}
+
+function resolveOverride(key, defaultVal, total) {
+  const ov = splitOverrides[key];
+  if (ov === undefined) return defaultVal;
+  if (ov && ov.pct !== undefined) return Math.round(ov.pct * total * 100) / 100;
+  if (ov && ov.fixed !== undefined) return ov.fixed;
+  // Legacy: plain number stored from old version — treat as fixed
+  if (typeof ov === 'number') return ov;
+  return defaultVal;
 }
 
 function computeGoalSplit(totalPay) {
@@ -1656,6 +1676,12 @@ function computeGoalSplit(totalPay) {
   }));
 }
 
+function onPayChange() {
+  // When pay changes, percentage-based overrides auto-scale via resolveOverride.
+  // Fixed overrides (rent, oneoff) stay as-is. Just re-render.
+  updatePlanner();
+}
+
 function updatePlanner() {
   const pay = parseFloat(document.getElementById('planner-pay').value) || 0;
   const extra = parseFloat(document.getElementById('planner-extra').value) || 0;
@@ -1665,9 +1691,21 @@ function updatePlanner() {
   const total = pay + extra;
   if (!total) return;
 
+  // Load persisted overrides (only if splitOverrides is empty — don't clobber edits in progress)
   if (state.plannerOverrides && Object.keys(splitOverrides).length === 0) {
-    splitOverrides = Object.assign({}, state.plannerOverrides);
+    splitOverrides = JSON.parse(JSON.stringify(state.plannerOverrides));
   }
+  // Migrate any legacy plain-number overrides to new format
+  Object.keys(splitOverrides).forEach(k => {
+    if (typeof splitOverrides[k] === 'number') {
+      const fixedKeys = ['rent', 'oneoff'];
+      if (fixedKeys.includes(k)) {
+        splitOverrides[k] = { fixed: splitOverrides[k] };
+      } else {
+        splitOverrides[k] = { pct: total > 0 ? splitOverrides[k] / total : 0 };
+      }
+    }
+  });
 
   // Weekly rent accrual — always half the fortnightly amount
   const weeklyRentAmt = Math.round(s.rent / 2 * 100) / 100;
@@ -1681,16 +1719,14 @@ function updatePlanner() {
   const goalSplit = computeGoalSplit(total);
   const defGoals = Math.round(goalSplit.reduce((a, d) => a + d.allocated, 0) * 100) / 100;
 
-  const get = (key, def) => splitOverrides[key] !== undefined ? splitOverrides[key] : def;
-
-  const rent = get('rent', defRent);
-  const savingsXfer = get('savings', defSavings);
-  const goalTotal = get('goals', defGoals);
-  const groceries = get('groceries', s.budgets['Groceries & Supermarket'] || 0);
-  const dining = get('dining', s.budgets['Dining & Takeaway'] || 0);
-  const transport = get('transport', s.budgets['Transport & Fuel'] || 0);
-  const bills = get('bills', s.budgets['Utilities & Bills'] || 0);
-  const misc = get('misc', s.budgets['Miscellaneous'] || 0);
+  const rent        = resolveOverride('rent',      defRent,                                        total);
+  const savingsXfer = resolveOverride('savings',   defSavings,                                     total);
+  const goalTotal   = resolveOverride('goals',     defGoals,                                       total);
+  const groceries   = resolveOverride('groceries', s.budgets['Groceries & Supermarket'] || 0,      total);
+  const dining      = resolveOverride('dining',    s.budgets['Dining & Takeaway'] || 0,            total);
+  const transport   = resolveOverride('transport', s.budgets['Transport & Fuel'] || 0,             total);
+  const bills       = resolveOverride('bills',     s.budgets['Utilities & Bills'] || 0,            total);
+  const misc        = resolveOverride('misc',      s.budgets['Miscellaneous'] || 0,                total);
 
   const allocated = rent + savingsXfer + goalTotal + oneoff + groceries + dining + transport + bills + misc;
   const leftover = Math.max(0, total - allocated);
@@ -1729,7 +1765,7 @@ function updatePlanner() {
 
   document.getElementById('planner-rows').innerHTML = rentDueNotice + rows.map(row => {
     const pct = total > 0 ? (row.val / total * 100).toFixed(0) : 0;
-    const isCustom = splitOverrides[row.key] !== undefined;
+    const isCustom = splitOverrides[row.key] !== undefined && !row.locked;
     if (splitEditing && !row.locked) {
       return '<div class="planner-row" style="align-items:flex-start;padding:0.5rem 0;">' +
         '<div style="flex:1;">' +
