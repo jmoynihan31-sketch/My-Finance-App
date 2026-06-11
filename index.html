@@ -361,6 +361,7 @@ select.form-input { appearance: none; background-image: url("data:image/svg+xml,
     </div>
     <div class="nav-tabs">
       <button class="nav-tab active" onclick="showPage('dashboard')">Dashboard</button>
+      <button class="nav-tab" onclick="showPage('lastweek')">Last Week</button>
       <button class="nav-tab" onclick="showPage('transactions')">Transactions</button>
       <button class="nav-tab" onclick="showPage('payday')">Pay Planner</button>
       <button class="nav-tab" onclick="showPage('goals')">Goals</button>
@@ -399,6 +400,13 @@ select.form-input { appearance: none; background-image: url("data:image/svg+xml,
   </div>
 
   <!-- TRANSACTIONS -->
+  <!-- LAST WEEK PERFORMANCE -->
+  <div class="page" id="page-lastweek">
+    <div style="margin-top:1rem;" id="lastweek-content">
+      <div class="empty"><div class="empty-icon">📊</div><h3>Loading...</h3></div>
+    </div>
+  </div>
+
   <div class="page" id="page-transactions">
     <div style="margin-top:1rem;display:flex;gap:0.5rem;flex-wrap:wrap;align-items:center;">
       <select class="form-input" id="tx-filter-cat" onchange="renderTransactions()" style="flex:1;min-width:130px;">
@@ -996,7 +1004,7 @@ function showPage(id) {
   document.querySelectorAll('.nav-tab').forEach(t => t.classList.remove('active'));
   document.getElementById('page-' + id).classList.add('active');
   const tabs = document.querySelectorAll('.nav-tab');
-  const pages = ['dashboard','transactions','payday','goals','networth','subs','settings'];
+  const pages = ['dashboard','lastweek','transactions','payday','goals','networth','subs','settings'];
   tabs[pages.indexOf(id)].classList.add('active');
   if (id === 'payday') renderPayday();
   if (id === 'goals') renderGoals();
@@ -1004,6 +1012,7 @@ function showPage(id) {
   if (id === 'subs') renderSubs();
   if (id === 'settings') renderSettings();
   if (id === 'transactions') renderTransactions();
+  if (id === 'lastweek') renderLastWeek();
 }
 
 // ════════════════════════════════════════════════════════════
@@ -1059,31 +1068,29 @@ function dateStrToLocal(dateStr) {
   return new Date(Date.UTC(y, m - 1, d) - 10 * 60 * 60 * 1000);
 }
 function getWeekKey(dateStr) {
-  // Returns "YYYY-MM-DD" of the Friday that starts the Fri-Thu week
-  // Works purely on the date string — no timezone conversion needed
-  // because Bendigo CSVs already record Brisbane local dates
+  // Returns "YYYY-MM-DD" of the Thursday that starts the Thu-Wed week
+  // Works purely on date strings — Bendigo CSVs record Brisbane local dates
   const [y, m, d] = dateStr.split('-').map(Number);
-  // Build a UTC date to do arithmetic safely
   const utc = Date.UTC(y, m - 1, d);
-  const day = new Date(utc).getUTCDay(); // 0=Sun,1=Mon,...,5=Fri,6=Sat
-  // Days since last Friday: Fri=0,Sat=1,Sun=2,Mon=3,Tue=4,Wed=5,Thu=6
-  const daysSinceFri = (day + 2) % 7;
-  const friUtc = utc - daysSinceFri * 86400000;
-  const fri = new Date(friUtc);
-  const fy = fri.getUTCFullYear();
-  const fm = String(fri.getUTCMonth() + 1).padStart(2, '0');
-  const fd = String(fri.getUTCDate()).padStart(2, '0');
-  return fy + '-' + fm + '-' + fd;
+  const day = new Date(utc).getUTCDay(); // 0=Sun,1=Mon,...,4=Thu,5=Fri,6=Sat
+  // Days since last Thursday: Thu=0,Fri=1,Sat=2,Sun=3,Mon=4,Tue=5,Wed=6
+  const daysSinceThu = (day + 3) % 7;
+  const thuUtc = utc - daysSinceThu * 86400000;
+  const thu = new Date(thuUtc);
+  const ty = thu.getUTCFullYear();
+  const tm = String(thu.getUTCMonth() + 1).padStart(2, '0');
+  const td = String(thu.getUTCDate()).padStart(2, '0');
+  return ty + '-' + tm + '-' + td;
 }
 function getWeekLabel(weekKey) {
-  const [fy, fm, fd] = weekKey.split('-').map(Number);
-  const friUtc = Date.UTC(fy, fm - 1, fd);
-  const thuUtc = friUtc + 6 * 86400000;
+  const [ty, tm, td] = weekKey.split('-').map(Number);
+  const thuUtc = Date.UTC(ty, tm - 1, td);
+  const wedUtc = thuUtc + 6 * 86400000;
   const fmtD = utcMs => {
     const dt = new Date(utcMs);
     return dt.toLocaleDateString('en-AU', { day: 'numeric', month: 'short', timeZone: 'UTC' });
   };
-  return fmtD(friUtc) + ' – ' + fmtD(thuUtc);
+  return fmtD(thuUtc) + ' – ' + fmtD(wedUtc);
 }
 function weekNum(dateStr) {
   // Legacy — kept for any callers, uses UTC-safe parse
@@ -1446,7 +1453,7 @@ function renderTransactions() {
     return;
   }
 
-  // Group by Fri-Thu week
+  // Group by Thu-Wed week
   const groups = {};
   txs.forEach(t => {
     const wk = getWeekKey(t.date);
@@ -1802,6 +1809,176 @@ function updatePlanner() {
   }).join('');
   document.getElementById('planner-habits').style.display = 'block';
 }
+// ════════════════════════════════════════════════════════════
+// LAST WEEK PERFORMANCE
+// ════════════════════════════════════════════════════════════
+function renderLastWeek() {
+  const allKeys = getAllWeekKeys();
+  const el = document.getElementById('lastweek-content');
+  if (allKeys.length < 2) {
+    el.innerHTML = '<div class="empty"><div class="empty-icon">📅</div><h3>Not enough data yet</h3><p>You need at least 2 weeks of transactions to see last week's performance.</p></div>';
+    return;
+  }
+
+  const thisWk  = allKeys[0];
+  const lastWk  = allKeys[1];
+  const s       = state.settings;
+
+  const lastTxs    = state.transactions.filter(t => getWeekKey(t.date) === lastWk);
+  const thisTxs    = state.transactions.filter(t => getWeekKey(t.date) === thisWk);
+
+  const lastIncome = lastTxs.reduce((a,t) => a + t.credit, 0);
+  const lastSpend  = lastTxs.reduce((a,t) => a + t.debit, 0);
+  const lastSaved  = lastTxs.filter(t => t.category === 'Savings Transfer').reduce((a,t) => a + t.debit, 0);
+  const lastNet    = lastIncome - lastSpend;
+
+  // Goals: what did we plan to save last week vs what was actually transferred
+  const goalSavingsPlanned = state.goals
+    .filter(g => getGoalStatus(g) !== 'COMPLETE' && getGoalStatus(g) !== 'OVERDUE')
+    .reduce((a, g) => {
+      const wks = weeksUntil(g.date) || 52;
+      const needed = Math.max(0, (g.target||0) - (g.saved||0));
+      return a + needed / wks;
+    }, 0);
+
+  const savingsTarget  = lastIncome * s.savingsPct;
+  const totalSavingsGoal = savingsTarget + goalSavingsPlanned;
+  const savingsGap     = lastSaved - totalSavingsGoal;
+  const metSavings     = lastSaved >= totalSavingsGoal;
+
+  // Category breakdown vs budget
+  const catTotals = {};
+  lastTxs.forEach(t => { if (t.debit > 0) catTotals[t.category] = (catTotals[t.category]||0) + t.debit; });
+
+  // Score calculation (0-100)
+  let score = 100;
+  const overBudgetCats = [];
+  Object.entries(catTotals).forEach(([cat, amt]) => {
+    const bud = s.budgets[cat] || 0;
+    if (bud > 0 && amt > bud) {
+      const overpct = (amt - bud) / bud;
+      score -= Math.min(15, overpct * 30);
+      overBudgetCats.push({ cat, amt, bud, over: amt - bud });
+    }
+  });
+  if (!metSavings && totalSavingsGoal > 0) {
+    const shortfall = totalSavingsGoal - lastSaved;
+    score -= Math.min(30, (shortfall / totalSavingsGoal) * 40);
+  }
+  score = Math.max(0, Math.round(score));
+
+  const scoreColor = score >= 80 ? 'var(--green)' : score >= 55 ? 'var(--orange)' : 'var(--red)';
+  const scoreLabel = score >= 80 ? 'Great week!' : score >= 55 ? 'Room to improve' : 'Tough week';
+  const scoreEmoji = score >= 80 ? '🏆' : score >= 55 ? '📈' : '💪';
+
+  // Build insight messages
+  const insights = [];
+  if (metSavings) {
+    insights.push({ icon:'✅', color:'var(--green)', msg:'Savings target met — ' + fmt(lastSaved) + ' saved vs goal of ' + fmt(totalSavingsGoal) });
+  } else {
+    insights.push({ icon:'⚠️', color:'var(--red)', msg:'Savings short by ' + fmt(totalSavingsGoal - lastSaved) + ' — goal was ' + fmt(totalSavingsGoal) });
+  }
+  if (overBudgetCats.length === 0) {
+    insights.push({ icon:'✅', color:'var(--green)', msg:'Every category stayed within budget' });
+  } else {
+    overBudgetCats.slice(0,3).forEach(o => {
+      insights.push({ icon:'⚠️', color:'var(--orange)', msg: catInfo(o.cat).icon + ' ' + o.cat + ' over budget by ' + fmt(o.over) + ' (' + fmt(o.amt) + ' vs ' + fmt(o.bud) + ')' });
+    });
+  }
+  if (lastNet > 0) {
+    insights.push({ icon:'✅', color:'var(--green)', msg:'Positive week — spent ' + fmt(Math.abs(lastNet)) + ' less than you earned' });
+  } else if (lastNet < 0) {
+    insights.push({ icon:'🔴', color:'var(--red)', msg:'Spent more than you earned this week by ' + fmt(Math.abs(lastNet)) });
+  }
+
+  // What to do differently this week
+  const actions = [];
+  overBudgetCats.slice(0,2).forEach(o => {
+    actions.push('Cut ' + o.cat + ' by ' + fmt(o.over) + ' — budget ' + fmt(o.bud) + '/wk');
+  });
+  if (!metSavings) {
+    actions.push('Increase savings transfer by ' + fmt(totalSavingsGoal - lastSaved) + ' this Thursday');
+  }
+  if (actions.length === 0) actions.push('Keep it up — no adjustments needed!');
+
+  el.innerHTML =
+    // Header
+    '<div class="card" style="background:var(--dark);color:#fff;margin-bottom:1rem;">' +
+      '<div style="font-size:0.7rem;opacity:0.7;text-transform:uppercase;letter-spacing:0.08em;margin-bottom:0.25rem;">Last Week</div>' +
+      '<div style="font-size:1rem;font-weight:800;">' + getWeekLabel(lastWk) + '</div>' +
+      '<div style="font-size:0.8rem;opacity:0.7;margin-top:0.15rem;">vs This week: ' + getWeekLabel(thisWk) + '</div>' +
+    '</div>' +
+
+    // Score card
+    '<div style="background:#fff;border-radius:12px;padding:1.25rem;box-shadow:0 2px 12px rgba(0,0,0,0.08);margin-bottom:1rem;text-align:center;">' +
+      '<div style="font-size:3rem;font-weight:900;color:' + scoreColor + ';line-height:1;">' + score + '</div>' +
+      '<div style="font-size:1rem;font-weight:700;color:' + scoreColor + ';margin-top:0.25rem;">' + scoreEmoji + ' ' + scoreLabel + '</div>' +
+      '<div style="font-size:0.75rem;color:var(--text2);margin-top:0.25rem;">Weekly performance score</div>' +
+      '<div style="background:#f0f0f0;border-radius:20px;height:8px;margin:0.75rem 0;">' +
+        '<div style="width:' + score + '%;height:100%;background:' + scoreColor + ';border-radius:20px;transition:width 0.6s ease;"></div>' +
+      '</div>' +
+    '</div>' +
+
+    // KPI row
+    '<div class="kpi-grid" style="margin-bottom:1rem;">' +
+      '<div class="kpi-card green"><div class="kpi-label">Income</div><div class="kpi-value">' + fmtK(lastIncome) + '</div><div class="kpi-sub">Last week</div></div>' +
+      '<div class="kpi-card red"><div class="kpi-label">Spent</div><div class="kpi-value">' + fmtK(lastSpend) + '</div><div class="kpi-sub">' + lastTxs.filter(t=>t.debit>0).length + ' transactions</div></div>' +
+      '<div class="kpi-card ' + (lastSaved >= totalSavingsGoal ? 'green' : 'red') + '"><div class="kpi-label">Saved</div><div class="kpi-value">' + fmtK(lastSaved) + '</div><div class="kpi-sub">Goal: ' + fmt(totalSavingsGoal) + '</div></div>' +
+      '<div class="kpi-card ' + (lastNet >= 0 ? 'green' : 'red') + '"><div class="kpi-label">Net</div><div class="kpi-value" style="color:' + (lastNet>=0?'var(--green)':'var(--red)') + ';">' + (lastNet>=0?'+':'') + fmtK(lastNet) + '</div><div class="kpi-sub">Income minus spend</div></div>' +
+    '</div>' +
+
+    // Insights
+    '<div class="card" style="margin-bottom:1rem;">' +
+      '<div class="card-title">What happened</div>' +
+      insights.map(i =>
+        '<div style="display:flex;gap:0.75rem;align-items:flex-start;padding:0.5rem 0;border-bottom:1px solid #f5f5f5;">' +
+          '<span style="font-size:1rem;flex-shrink:0;">' + i.icon + '</span>' +
+          '<span style="font-size:0.875rem;color:var(--text);line-height:1.4;">' + i.msg + '</span>' +
+        '</div>'
+      ).join('') +
+    '</div>' +
+
+    // Category vs budget breakdown
+    '<div class="card" style="margin-bottom:1rem;">' +
+      '<div class="card-title">Category Breakdown</div>' +
+      (Object.keys(catTotals).length ?
+        Object.entries(catTotals).sort((a,b) => b[1]-a[1]).map(([cat, amt]) => {
+          const ci = catInfo(cat);
+          const bud = s.budgets[cat] || 0;
+          const over = bud > 0 && amt > bud;
+          const pct = bud > 0 ? Math.min(100, amt/bud*100) : 50;
+          return '<div style="margin-bottom:0.85rem;">' +
+            '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.25rem;">' +
+              '<span style="font-size:0.85rem;font-weight:600;">' + ci.icon + ' ' + cat + '</span>' +
+              '<div style="text-align:right;">' +
+                '<span style="font-size:0.85rem;font-weight:700;color:' + (over?'var(--red)':'var(--text)') + ';">' + fmt(amt) + '</span>' +
+                (bud>0 ? '<span style="font-size:0.7rem;color:var(--text2);"> / ' + fmt(bud) + '</span>' : '') +
+              '</div>' +
+            '</div>' +
+            (bud>0 ?
+              '<div style="background:#f0f0f0;border-radius:20px;height:6px;overflow:hidden;">' +
+                '<div style="width:' + pct + '%;height:100%;background:' + (over?'var(--red)':ci.color) + ';border-radius:20px;"></div>' +
+              '</div>' +
+              (over ? '<div style="font-size:0.7rem;color:var(--red);margin-top:0.15rem;font-weight:700;">⚠️ Over by ' + fmt(amt-bud) + '</div>' : '') : ''
+            ) +
+          '</div>';
+        }).join('') :
+        '<p style="font-size:0.875rem;color:var(--text2);">No spending recorded last week</p>'
+      ) +
+    '</div>' +
+
+    // This week action plan
+    '<div class="card" style="background:var(--accent);color:#fff;">' +
+      '<div style="font-size:0.75rem;opacity:0.8;text-transform:uppercase;letter-spacing:0.08em;margin-bottom:0.5rem;">🎯 Action Plan for This Week</div>' +
+      actions.map((a, i) =>
+        '<div style="display:flex;gap:0.6rem;align-items:flex-start;padding:0.4rem 0;' + (i>0?'border-top:1px solid rgba(255,255,255,0.15);':'') + '">' +
+          '<span style="font-size:0.85rem;font-weight:800;opacity:0.7;flex-shrink:0;">' + (i+1) + '.</span>' +
+          '<span style="font-size:0.875rem;line-height:1.4;">' + a + '</span>' +
+        '</div>'
+      ).join('') +
+    '</div>';
+}
+
 // ════════════════════════════════════════════════════════════
 // GOALS
 // ════════════════════════════════════════════════════════════
