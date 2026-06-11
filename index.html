@@ -450,15 +450,15 @@ select.form-input { appearance: none; background-image: url("data:image/svg+xml,
         <div style="font-size:0.8rem;font-weight:700;color:var(--text2);text-transform:uppercase;letter-spacing:0.06em;margin-bottom:0.75rem;">📥 This Week's Pay</div>
         <div class="form-group">
           <label class="form-label">Actual Pay Received ($)</label>
-          <input class="form-input" id="planner-pay" type="number" placeholder="1200.00" oninput="onPayChange()">
+          <input class="form-input" id="planner-pay" type="number" placeholder="1200.00" oninput="savePlannerSession();onPayChange()">
         </div>
         <div class="form-group">
           <label class="form-label">Extra Income This Week ($)</label>
-          <input class="form-input" id="planner-extra" type="number" placeholder="0.00" value="0" oninput="updatePlanner()">
+          <input class="form-input" id="planner-extra" type="number" placeholder="0.00" oninput="savePlannerSession();updatePlanner()">
         </div>
         <div class="form-group">
           <label class="form-label">One-Off Bills This Week ($) <span style="font-size:0.7rem;color:var(--text2);">rego, dentist, etc.</span></label>
-          <input class="form-input" id="planner-oneoff" type="number" placeholder="0.00" value="0" oninput="updatePlanner()">
+          <input class="form-input" id="planner-oneoff" type="number" placeholder="0.00" oninput="savePlannerSession();updatePlanner()">
         </div>
         <div style="background:#F0F4FF;border-radius:10px;padding:0.85rem;margin-bottom:1rem;border-left:3px solid var(--accent);">
           <div style="font-size:0.75rem;font-weight:700;color:var(--accent);margin-bottom:0.4rem;">🏠 RENT — Weekly saving strategy</div>
@@ -466,7 +466,7 @@ select.form-input { appearance: none; background-image: url("data:image/svg+xml,
             Half your fortnightly rent (<strong id="rent-half-display">$0</strong>) is set aside <em>every week</em>. On payment weeks the full amount is transferred to your landlord.
           </div>
           <label class="form-label" style="margin-bottom:0.3rem;">Is rent due this week (fortnightly payment)?</label>
-          <select class="form-input" id="planner-rent" onchange="updatePlanner()">
+          <select class="form-input" id="planner-rent" onchange="savePlannerSession();updatePlanner()">
             <option value="0">No — saving half this week</option>
             <option value="1">Yes — paying full rent tonight</option>
           </select>
@@ -1579,7 +1579,12 @@ function renderPayday() {
   const now = new Date();
   const bneStr = brisbaneToday(); const [by,bm,bd] = bneStr.split('-').map(Number); const bneDate = new Date(Date.UTC(by,bm-1,bd));
   document.getElementById('planner-date').textContent = bneDate.toLocaleDateString('en-AU',{weekday:'long',day:'numeric',month:'long',year:'numeric',timeZone:'UTC'});
-  document.getElementById('planner-pay').value = state.settings.weeklyPay || '';
+  // Restore last entered values, fall back to setup defaults
+  const ps = state.plannerSession || {};
+  document.getElementById('planner-pay').value    = ps.pay    || state.settings.weeklyPay || '';
+  document.getElementById('planner-extra').value  = ps.extra  || '0';
+  document.getElementById('planner-oneoff').value = ps.oneoff || '0';
+  if (ps.rent !== undefined) document.getElementById('planner-rent').value = ps.rent;
   const rentDueChecklist = document.getElementById('planner-rent') && document.getElementById('planner-rent').value === '1';
   const checks = [rentDueChecklist ? 'Transfer full rent (' + fmt(state.settings.rent) + ') to landlord tonight' : 'Move half rent (' + fmt(state.settings.rent/2) + ') to your rent savings pot', 'Move savings target to savings account',
     'Allocate goal contributions to sub-accounts', 'Log all this week\'s transactions',
@@ -1610,18 +1615,11 @@ function toggleSplitEdit() {
   updatePlanner();
 }
 
-function setSplitOverride(key, val) {
-  const pay = (parseFloat(document.getElementById('planner-pay').value) || 0) +
-              (parseFloat(document.getElementById('planner-extra').value) || 0);
-  const dollarVal = parseFloat(val) || 0;
-  // Store as fraction of total pay so it scales when pay changes
-  // For fixed items (rent, oneoff) store raw dollar value instead
-  const fixedKeys = ['rent', 'oneoff'];
-  if (fixedKeys.includes(key) || pay === 0) {
-    splitOverrides[key] = { fixed: dollarVal };
-  } else {
-    splitOverrides[key] = { pct: dollarVal / pay };
-  }
+function setSplitOverride(key, pctVal) {
+  // pctVal is 0-100 (percentage of total pay)
+  const pct = parseFloat(pctVal);
+  if (isNaN(pct) || pct < 0) return;
+  splitOverrides[key] = { pct: Math.min(pct, 100) / 100 };
   state.plannerOverrides = JSON.parse(JSON.stringify(splitOverrides));
   saveStateSync();
   updatePlanner();
@@ -1674,6 +1672,16 @@ function computeGoalSplit(totalPay) {
     allocated: Math.round(d.perWk * scale * 100) / 100,
     funded: scale >= 1,
   }));
+}
+
+function savePlannerSession() {
+  state.plannerSession = {
+    pay:    document.getElementById('planner-pay').value,
+    extra:  document.getElementById('planner-extra').value,
+    oneoff: document.getElementById('planner-oneoff').value,
+    rent:   document.getElementById('planner-rent').value,
+  };
+  saveStateSync();
 }
 
 function onPayChange() {
@@ -1767,17 +1775,19 @@ function updatePlanner() {
     const pct = total > 0 ? (row.val / total * 100).toFixed(0) : 0;
     const isCustom = splitOverrides[row.key] !== undefined && !row.locked;
     if (splitEditing && !row.locked) {
-      return '<div class="planner-row" style="align-items:flex-start;padding:0.5rem 0;">' +
+      const inputId = 'split-input-' + row.key;
+      return '<div class="planner-row" style="align-items:center;padding:0.6rem 0;">' +
         '<div style="flex:1;">' +
           '<div class="planner-label">' + row.icon + ' ' + row.label + '</div>' +
-          '<div style="font-size:0.7rem;color:var(--text2);">' + row.note + '</div>' +
+          '<div style="font-size:0.7rem;color:var(--text2);">' + fmt(row.val) + '</div>' +
         '</div>' +
-        '<div style="display:flex;align-items:center;gap:0.4rem;margin-top:0.1rem;">' +
-          '<span style="font-size:0.85rem;color:var(--text2);">$</span>' +
-          '<input type="number" value="' + row.val.toFixed(2) + '"' +
-            ' style="width:80px;padding:0.35rem 0.5rem;border:1.5px solid ' + (isCustom ? 'var(--accent)' : 'var(--border)') + ';border-radius:8px;font-size:0.9rem;font-weight:700;text-align:right;background:' + (isCustom ? '#EEF4FF' : '#FAFAFA') + ';"' +
-            ' oninput="setSplitOverride(\'' + row.key + '\', this.value)">' +
-          '<span style="font-size:0.7rem;color:var(--text2);width:28px;text-align:right;">' + pct + '%</span>' +
+        '<div style="display:flex;align-items:center;gap:0.4rem;">' +
+          '<input type="number" id="' + inputId + '" value="' + parseFloat(pct).toFixed(1) + '"' +
+            ' min="0" max="100" step="0.5"' +
+            ' style="width:72px;padding:0.4rem 0.5rem;border:2px solid ' + (isCustom ? 'var(--accent)' : 'var(--border)') + ';border-radius:8px;font-size:1rem;font-weight:700;text-align:right;background:' + (isCustom ? '#EEF4FF' : '#fff') + ';-webkit-appearance:none;appearance:none;"' +
+            ' onchange="setSplitOverride(\'' + row.key + '\', this.value)"' +
+            ' onblur="setSplitOverride(\'' + row.key + '\', this.value)">' +
+          '<span style="font-size:0.9rem;font-weight:700;color:var(--text2);">%</span>' +
         '</div>' +
       '</div>';
     }
