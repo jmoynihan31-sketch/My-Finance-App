@@ -1043,35 +1043,71 @@ function learnFromCorrection(desc, newCat) {
     state.learnedRules[kw] = newCat;
   }
 }
+// ── Brisbane time helpers (AEST UTC+10, no DST adjustment needed for QLD) ──
+function brisbaneToday() {
+  // Returns "YYYY-MM-DD" string in Brisbane local time (UTC+10, no DST)
+  const now = new Date();
+  const bne = new Date(now.getTime() + 10 * 60 * 60 * 1000);
+  return bne.toISOString().split('T')[0];
+}
+function dateStrToLocal(dateStr) {
+  // Parses a "YYYY-MM-DD" string as a local Brisbane midnight Date object
+  // Using T00:00:00 without Z means the browser treats it as local time,
+  // but we pin it explicitly to Brisbane by offsetting from UTC
+  const [y, m, d] = dateStr.split('-').map(Number);
+  // Return a Date representing midnight Brisbane = UTC-10h
+  return new Date(Date.UTC(y, m - 1, d) - 10 * 60 * 60 * 1000);
+}
 function getWeekKey(dateStr) {
   // Returns "YYYY-MM-DD" of the Friday that starts the Fri-Thu week
-  const d = new Date(dateStr + 'T00:00:00');
-  const day = d.getDay(); // 0=Sun,1=Mon,...,5=Fri,6=Sat
-  // Days since last Friday: Fri=0, Sat=1, Sun=2, Mon=3, Tue=4, Wed=5, Thu=6
+  // Works purely on the date string — no timezone conversion needed
+  // because Bendigo CSVs already record Brisbane local dates
+  const [y, m, d] = dateStr.split('-').map(Number);
+  // Build a UTC date to do arithmetic safely
+  const utc = Date.UTC(y, m - 1, d);
+  const day = new Date(utc).getUTCDay(); // 0=Sun,1=Mon,...,5=Fri,6=Sat
+  // Days since last Friday: Fri=0,Sat=1,Sun=2,Mon=3,Tue=4,Wed=5,Thu=6
   const daysSinceFri = (day + 2) % 7;
-  const fri = new Date(d);
-  fri.setDate(d.getDate() - daysSinceFri);
-  return fri.toISOString().split('T')[0];
+  const friUtc = utc - daysSinceFri * 86400000;
+  const fri = new Date(friUtc);
+  const fy = fri.getUTCFullYear();
+  const fm = String(fri.getUTCMonth() + 1).padStart(2, '0');
+  const fd = String(fri.getUTCDate()).padStart(2, '0');
+  return fy + '-' + fm + '-' + fd;
 }
 function getWeekLabel(weekKey) {
-  const fri = new Date(weekKey + 'T00:00:00');
-  const thu = new Date(fri); thu.setDate(fri.getDate() + 6);
-  const fmt2 = d => d.toLocaleDateString('en-AU',{day:'numeric',month:'short'});
-  return fmt2(fri) + ' – ' + fmt2(thu);
+  const [fy, fm, fd] = weekKey.split('-').map(Number);
+  const friUtc = Date.UTC(fy, fm - 1, fd);
+  const thuUtc = friUtc + 6 * 86400000;
+  const fmtD = utcMs => {
+    const dt = new Date(utcMs);
+    return dt.toLocaleDateString('en-AU', { day: 'numeric', month: 'short', timeZone: 'UTC' });
+  };
+  return fmtD(friUtc) + ' – ' + fmtD(thuUtc);
 }
 function weekNum(dateStr) {
-  const d = new Date(dateStr); const jan1 = new Date(d.getFullYear(), 0, 1);
-  return Math.ceil(((d - jan1) / 86400000 + jan1.getDay() + 1) / 7);
+  // Legacy — kept for any callers, uses UTC-safe parse
+  const [y, m, d] = dateStr.split('-').map(Number);
+  const utc = Date.UTC(y, m - 1, d);
+  const jan1 = Date.UTC(y, 0, 1);
+  const dayOfWeek = new Date(jan1).getUTCDay();
+  return Math.ceil(((utc - jan1) / 86400000 + dayOfWeek + 1) / 7);
 }
 function getAllWeekKeys() {
   const keys = [...new Set(state.transactions.map(t => getWeekKey(t.date)))];
-  return keys.sort((a,b) => b.localeCompare(a)); // newest first
+  return keys.sort((a, b) => b.localeCompare(a)); // newest first
 }
-function currentWeekKey() { return getWeekKey(new Date().toISOString().split('T')[0]); }
+function currentWeekKey() {
+  return getWeekKey(brisbaneToday());
+}
 function weeksUntil(dateStr) {
   if (!dateStr) return null;
-  const diff = new Date(dateStr) - new Date();
-  return Math.max(0, Math.floor(diff / (7 * 86400000)));
+  const today = brisbaneToday();
+  const [ty, tm, td] = today.split('-').map(Number);
+  const [gy, gm, gd] = dateStr.split('-').map(Number);
+  const todayUtc = Date.UTC(ty, tm - 1, td);
+  const goalUtc  = Date.UTC(gy, gm - 1, gd);
+  return Math.max(0, Math.floor((goalUtc - todayUtc) / (7 * 86400000)));
 }
 
 // ════════════════════════════════════════════════════════════
@@ -1487,7 +1523,7 @@ function applyRecat(id, newCat, modalEl) {
 function openAddTx() {
   document.getElementById('tx-edit-id').value = '';
   document.getElementById('tx-modal-title').textContent = 'Add Transaction';
-  document.getElementById('tx-date').value = new Date().toISOString().split('T')[0];
+  document.getElementById('tx-date').value = brisbaneToday();
   document.getElementById('tx-desc').value = '';
   document.getElementById('tx-debit').value = '';
   document.getElementById('tx-credit').value = '';
@@ -1518,7 +1554,8 @@ function saveTx() {
 // ════════════════════════════════════════════════════════════
 function renderPayday() {
   const now = new Date();
-  document.getElementById('planner-date').textContent = now.toLocaleDateString('en-AU',{weekday:'long',day:'numeric',month:'long',year:'numeric'});
+  const bneStr = brisbaneToday(); const [by,bm,bd] = bneStr.split('-').map(Number); const bneDate = new Date(Date.UTC(by,bm-1,bd));
+  document.getElementById('planner-date').textContent = bneDate.toLocaleDateString('en-AU',{weekday:'long',day:'numeric',month:'long',year:'numeric',timeZone:'UTC'});
   document.getElementById('planner-pay').value = state.settings.weeklyPay || '';
   const rentDueChecklist = document.getElementById('planner-rent') && document.getElementById('planner-rent').value === '1';
   const checks = [rentDueChecklist ? 'Transfer full rent (' + fmt(state.settings.rent) + ') to landlord tonight' : 'Move half rent (' + fmt(state.settings.rent/2) + ') to your rent savings pot', 'Move savings target to savings account',
@@ -1772,7 +1809,7 @@ function getGoalStatus(g) {
   const wks = weeksUntil(g.date);
   const pct = (g.saved||0) / g.target;
   if ((g.saved||0) >= g.target) return 'COMPLETE';
-  if (g.date && new Date(g.date) < new Date()) return 'OVERDUE';
+  if (g.date && g.date < brisbaneToday()) return 'OVERDUE';
   if (wks !== null && wks <= 4) return 'URGENT';
   if (pct >= 0.75) return 'On Track';
   if (pct >= 0.4) return 'In Progress';
@@ -1962,7 +1999,7 @@ function renderSubs() {
     return;
   }
   list.innerHTML = state.subscriptions.map(s => {
-    const daysLeft = s.date ? Math.ceil((new Date(s.date)-new Date())/86400000) : null;
+    const daysLeft = s.date ? Math.ceil((Date.UTC(...s.date.split('-').map(Number).map((v,i)=>i===1?v-1:v)) - Date.UTC(...brisbaneToday().split('-').map(Number).map((v,i)=>i===1?v-1:v))) / 86400000) : null;
     return `<div class="sub-item">
       <div>
         <div class="sub-name">${s.name}</div>
@@ -2049,7 +2086,7 @@ function exportData() {
   const blob = new Blob([JSON.stringify(state, null, 2)], {type:'application/json'});
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
-  a.download = `finance_backup_${new Date().toISOString().split('T')[0]}.json`;
+  a.download = `finance_backup_${brisbaneToday()}.json`;
   a.click();
   showToast('Data exported ✅');
 }
