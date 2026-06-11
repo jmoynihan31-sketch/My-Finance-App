@@ -372,13 +372,24 @@ select.form-input { appearance: none; background-image: url("data:image/svg+xml,
 
   <!-- DASHBOARD -->
   <div class="page active" id="page-dashboard">
-    <div id="dash-kpis" style="margin-top:1rem;"></div>
+    <div style="margin-top:1rem;">
+      <!-- Week selector -->
+      <div style="display:flex;align-items:center;justify-content:space-between;background:#fff;border-radius:12px;padding:0.75rem 1rem;box-shadow:0 2px 12px rgba(0,0,0,0.08);margin-bottom:1rem;">
+        <button onclick="navWeek(-1)" style="background:none;border:none;font-size:1.3rem;cursor:pointer;padding:0.25rem 0.5rem;color:var(--accent);">‹</button>
+        <div style="text-align:center;flex:1;">
+          <div style="font-size:0.65rem;font-weight:700;color:var(--text2);text-transform:uppercase;letter-spacing:0.08em;">Week</div>
+          <div style="font-size:0.9rem;font-weight:700;color:var(--text);" id="dash-week-label">Loading...</div>
+        </div>
+        <button onclick="navWeek(1)" style="background:none;border:none;font-size:1.3rem;cursor:pointer;padding:0.25rem 0.5rem;color:var(--accent);" id="dash-next-btn">›</button>
+      </div>
+    </div>
+    <div id="dash-kpis"></div>
     <div class="card">
       <div class="card-title">Spending by Category</div>
       <div id="dash-cats"></div>
     </div>
     <div class="card">
-      <div class="card-title">Recent Transactions <span onclick="showPage('transactions')">See all →</span></div>
+      <div class="card-title">This Week's Transactions <span onclick="showPage('transactions')">See all →</span></div>
       <div id="dash-recent"></div>
     </div>
     <div class="card">
@@ -761,6 +772,7 @@ let state = {
   goals: [],
   netWorth: { assets: [], liabilities: [] },
   subscriptions: [],
+  learnedRules: {},  // merchant keyword -> category, learned from user corrections
   settings: {
     name: '', weeklyPay: 1200, rent: 900, savingsPct: 0.20,
     budgets: {
@@ -771,8 +783,10 @@ let state = {
     }
   },
   hecs: { balance: 0, income: 0 },
-  checklistState: {}
+  checklistState: {},
+  selectedWeekKey: null
 };
+let currentDashWeek = null;
 
 let pendingImport = [];
 let setupPinBuffer = '';
@@ -1000,15 +1014,52 @@ function closeModal(id) { document.getElementById(id).classList.remove('open'); 
 function catInfo(name) { return CATS.find(c => c.name === name) || CATS[CATS.length-1]; }
 function autoCategory(desc) {
   const d = desc.toLowerCase();
+  // Check learned rules first (user corrections take priority)
+  if (state.learnedRules) {
+    for (const [kw, cat] of Object.entries(state.learnedRules)) {
+      if (d.includes(kw.toLowerCase())) return cat;
+    }
+  }
+  // Fall back to built-in keywords
   for (const [cat, kws] of Object.entries(CAT_KEYWORDS)) {
     if (kws.some(kw => d.includes(kw))) return cat;
   }
   return 'Miscellaneous';
 }
+function learnFromCorrection(desc, newCat) {
+  // Extract a meaningful keyword from the description (first 2+ words, max 20 chars)
+  const words = desc.toLowerCase().replace(/[^a-z0-9\s]/g,' ').trim().split(/\s+/);
+  const kw = words.slice(0, Math.min(3, words.length)).join(' ').substring(0, 20).trim();
+  if (kw.length > 2) {
+    if (!state.learnedRules) state.learnedRules = {};
+    state.learnedRules[kw] = newCat;
+  }
+}
+function getWeekKey(dateStr) {
+  // Returns "YYYY-MM-DD" of the Friday that starts the Fri-Thu week
+  const d = new Date(dateStr + 'T00:00:00');
+  const day = d.getDay(); // 0=Sun,1=Mon,...,5=Fri,6=Sat
+  // Days since last Friday: Fri=0, Sat=1, Sun=2, Mon=3, Tue=4, Wed=5, Thu=6
+  const daysSinceFri = (day + 2) % 7;
+  const fri = new Date(d);
+  fri.setDate(d.getDate() - daysSinceFri);
+  return fri.toISOString().split('T')[0];
+}
+function getWeekLabel(weekKey) {
+  const fri = new Date(weekKey + 'T00:00:00');
+  const thu = new Date(fri); thu.setDate(fri.getDate() + 6);
+  const fmt2 = d => d.toLocaleDateString('en-AU',{day:'numeric',month:'short'});
+  return fmt2(fri) + ' – ' + fmt2(thu);
+}
 function weekNum(dateStr) {
   const d = new Date(dateStr); const jan1 = new Date(d.getFullYear(), 0, 1);
   return Math.ceil(((d - jan1) / 86400000 + jan1.getDay() + 1) / 7);
 }
+function getAllWeekKeys() {
+  const keys = [...new Set(state.transactions.map(t => getWeekKey(t.date)))];
+  return keys.sort((a,b) => b.localeCompare(a)); // newest first
+}
+function currentWeekKey() { return getWeekKey(new Date().toISOString().split('T')[0]); }
 function weeksUntil(dateStr) {
   if (!dateStr) return null;
   const diff = new Date(dateStr) - new Date();
@@ -1168,16 +1219,24 @@ function confirmImport() {
   let added = 0;
   pendingImport.forEach(t => {
     t.account = accountType;
-    // Avoid exact duplicates (same date + desc + amount)
     const dup = state.transactions.find(e => e.date === t.date && e.description === t.description && e.debit === t.debit && e.credit === t.credit);
-    if (!dup) { state.transactions.push(t); added++; }
+    if (!dup) {
+      // Re-run autoCategory so learned rules apply to new imports
+      t.category = autoCategory(t.description);
+      state.transactions.push(t);
+      added++;
+    }
   });
   state.transactions.sort((a,b) => b.date.localeCompare(a.date));
+  // Jump dashboard to the most recent imported week
+  if (added > 0) {
+    currentDashWeek = getWeekKey(state.transactions[0].date);
+  }
   saveStateSync();
   closeModal('import-modal');
   pendingImport = [];
   renderAll();
-  showToast(`Imported ${added} transactions`);
+  showToast(`Imported ${added} transactions — categories auto-applied`);
 }
 
 // ════════════════════════════════════════════════════════════
@@ -1192,46 +1251,78 @@ function renderAll() {
 // ════════════════════════════════════════════════════════════
 // DASHBOARD
 // ════════════════════════════════════════════════════════════
+function navWeek(dir) {
+  const allKeys = getAllWeekKeys();
+  if (!allKeys.length) return;
+  if (!currentDashWeek) currentDashWeek = allKeys[0];
+  const idx = allKeys.indexOf(currentDashWeek);
+  const newIdx = idx - dir; // dir=1 means forward (newer), dir=-1 means back (older)
+  if (newIdx < 0 || newIdx >= allKeys.length) return;
+  currentDashWeek = allKeys[newIdx];
+  renderDashboard();
+}
+
 function renderDashboard() {
-  const txs = state.transactions;
+  const allKeys = getAllWeekKeys();
   const s = state.settings;
+
+  // Set current week if not set
+  if (!currentDashWeek || !allKeys.includes(currentDashWeek)) {
+    currentDashWeek = allKeys[0] || currentWeekKey();
+  }
+
+  const wk = currentDashWeek;
+  const allIdx = allKeys.indexOf(wk);
+  const isNewest = allIdx === 0;
+  const isOldest = allIdx === allKeys.length - 1;
+
+  // Week label
+  const wkLabel = allKeys.length ? getWeekLabel(wk) : 'No data yet';
+  const isCurrentWk = wk === currentWeekKey();
+  document.getElementById('dash-week-label').textContent = (isCurrentWk ? 'This week: ' : '') + wkLabel;
+  document.getElementById('dash-next-btn').style.opacity = isNewest ? '0.3' : '1';
+  document.getElementById('dash-next-btn').style.pointerEvents = isNewest ? 'none' : 'auto';
+
+  // Filter transactions for selected week
+  const txs = state.transactions.filter(t => getWeekKey(t.date) === wk);
   const totalSpend = txs.reduce((a,t) => a + t.debit, 0);
   const totalIncome = txs.reduce((a,t) => a + t.credit, 0);
-  const wksTracked = new Set(txs.map(t => weekNum(t.date))).size || 1;
   const totalSaved = txs.filter(t => t.category === 'Savings Transfer').reduce((a,t) => a + t.debit, 0);
+  const netFlow = totalIncome - totalSpend;
 
+  // KPIs for this week
   document.getElementById('dash-kpis').innerHTML = `
     <div class="kpi-grid">
       <div class="kpi-card green">
-        <div class="kpi-label">Total Income</div>
+        <div class="kpi-label">Income</div>
         <div class="kpi-value">${fmtK(totalIncome)}</div>
-        <div class="kpi-sub">${wksTracked} wk${wksTracked!==1?'s':''} tracked</div>
+        <div class="kpi-sub">This week</div>
       </div>
       <div class="kpi-card red">
-        <div class="kpi-label">Total Spent</div>
+        <div class="kpi-label">Spent</div>
         <div class="kpi-value">${fmtK(totalSpend)}</div>
-        <div class="kpi-sub">Across all categories</div>
+        <div class="kpi-sub">${txs.filter(t=>t.debit>0).length} transactions</div>
       </div>
-      <div class="kpi-card">
-        <div class="kpi-label">Weekly Pay</div>
-        <div class="kpi-value">${fmt(s.weeklyPay)}</div>
-        <div class="kpi-sub">Take-home</div>
+      <div class="kpi-card ${netFlow>=0?'green':'red'}">
+        <div class="kpi-label">Net</div>
+        <div class="kpi-value" style="color:${netFlow>=0?'var(--green)':'var(--red)'};">${netFlow>=0?'+':''}${fmtK(netFlow)}</div>
+        <div class="kpi-sub">Income minus spend</div>
       </div>
       <div class="kpi-card orange">
         <div class="kpi-label">Saved</div>
         <div class="kpi-value">${fmtK(totalSaved)}</div>
-        <div class="kpi-sub">Transfers to savings</div>
+        <div class="kpi-sub">Transfers out</div>
       </div>
     </div>`;
 
-  // Category breakdown
+  // Category breakdown for this week
   const catTotals = {};
   txs.forEach(t => { if (t.debit > 0) catTotals[t.category] = (catTotals[t.category]||0) + t.debit; });
   const sorted = Object.entries(catTotals).sort((a,b) => b[1]-a[1]);
   const maxCat = sorted[0]?.[1] || 1;
   document.getElementById('dash-cats').innerHTML = sorted.length ? sorted.map(([cat, amt]) => {
     const ci = catInfo(cat);
-    const bud = (s.budgets[cat]||0) * wksTracked;
+    const bud = s.budgets[cat]||0;
     const pct = Math.min(100, (amt/maxCat)*100);
     const overBudget = bud > 0 && amt > bud;
     return `<div style="margin-bottom:0.75rem;">
@@ -1242,17 +1333,17 @@ function renderDashboard() {
       <div class="progress-wrap">
         <div class="progress-bar" style="width:${pct}%;background:${overBudget?'var(--red)':ci.color};"></div>
       </div>
-      ${bud>0?`<div style="font-size:0.7rem;color:var(--text2);margin-top:0.15rem;">Budget: ${fmt(bud)} ${overBudget?'<span style="color:var(--red);font-weight:700;">⚠️ Over by '+fmt(amt-bud)+'</span>':''}</div>`:''}
+      ${bud>0?`<div style="font-size:0.7rem;color:var(--text2);margin-top:0.15rem;">Budget: ${fmt(bud)}/wk ${overBudget?'<span style="color:var(--red);font-weight:700;">⚠️ Over by '+fmt(amt-bud)+'</span>':''}</div>`:''}
     </div>`;
-  }).join('') : '<div class="empty"><div class="empty-icon">📊</div><p>No transactions yet.<br>Import a CSV to get started.</p></div>';
+  }).join('') : `<div class="empty"><div class="empty-icon">📊</div><p>${allKeys.length?'No transactions this week':'Import a CSV to get started'}</p></div>`;
 
-  // Recent transactions
-  const recent = txs.slice(0, 5);
+  // This week transactions (last 6)
+  const recent = txs.slice(0, 6);
   document.getElementById('dash-recent').innerHTML = recent.length ? recent.map(t => txRow(t)).join('') :
-    '<p style="font-size:0.875rem;color:var(--text2);text-align:center;padding:1rem;">No transactions yet</p>';
+    '<p style="font-size:0.875rem;color:var(--text2);text-align:center;padding:1rem;">No transactions this week</p>';
 
   // Goals
-  const goals = state.goals.filter(g => g.status !== 'COMPLETE').slice(0,3);
+  const goals = state.goals.filter(g => getGoalStatus(g) !== 'COMPLETE').slice(0,3);
   document.getElementById('dash-goals').innerHTML = goals.length ? goals.map(g => miniGoal(g)).join('') :
     '<p style="font-size:0.875rem;color:var(--text2);text-align:center;padding:1rem;">No goals set yet</p>';
 }
@@ -1295,7 +1386,6 @@ function miniGoal(g) {
 // TRANSACTIONS
 // ════════════════════════════════════════════════════════════
 function renderTransactions() {
-  // Populate category filter
   const sel = document.getElementById('tx-filter-cat');
   const current = sel.value;
   sel.innerHTML = '<option value="">All Categories</option>' + CATS.map(c => `<option value="${c.name}">${c.icon} ${c.name}</option>`).join('');
@@ -1307,26 +1397,83 @@ function renderTransactions() {
   if (catF) txs = txs.filter(t => t.category === catF);
   if (accF) txs = txs.filter(t => t.account === accF);
 
-  document.getElementById('tx-list').innerHTML = txs.length ?
-    `<div class="card">${txs.map(t => txRow(t)).join('')}</div>` :
-    `<div class="empty"><div class="empty-icon">📄</div><h3>No transactions</h3><p>Import a Bendigo CSV or add manually.</p></div>`;
+  if (!txs.length) {
+    document.getElementById('tx-list').innerHTML = `<div class="empty"><div class="empty-icon">📄</div><h3>No transactions</h3><p>Import a Bendigo CSV or add manually.</p></div>`;
+    return;
+  }
+
+  // Group by Fri-Thu week
+  const groups = {};
+  txs.forEach(t => {
+    const wk = getWeekKey(t.date);
+    if (!groups[wk]) groups[wk] = [];
+    groups[wk].push(t);
+  });
+  const weekKeys = Object.keys(groups).sort((a,b) => b.localeCompare(a));
+
+  document.getElementById('tx-list').innerHTML = weekKeys.map(wk => {
+    const weekTxs = groups[wk];
+    const totalDebit  = weekTxs.reduce((a,t) => a+t.debit, 0);
+    const totalCredit = weekTxs.reduce((a,t) => a+t.credit, 0);
+    const isCurrent = wk === currentWeekKey();
+    return `<div style="margin-bottom:1rem;">
+      <div style="display:flex;justify-content:space-between;align-items:center;padding:0.5rem 0.25rem;margin-bottom:0.25rem;">
+        <div>
+          <span style="font-size:0.75rem;font-weight:800;color:var(--accent);text-transform:uppercase;letter-spacing:0.06em;">
+            ${isCurrent?'📅 This week: ':''}${getWeekLabel(wk)}
+          </span>
+        </div>
+        <div style="text-align:right;font-size:0.75rem;">
+          <span style="color:var(--green);font-weight:700;">+${fmt(totalCredit)}</span>
+          <span style="color:#ccc;margin:0 0.25rem;">|</span>
+          <span style="color:var(--red);font-weight:700;">-${fmt(totalDebit)}</span>
+        </div>
+      </div>
+      <div class="card" style="margin-bottom:0;">${weekTxs.map(t => txRow(t)).join('')}</div>
+    </div>`;
+  }).join('');
 
   // Populate cat select in modal
-  const ms = document.getElementById('tx-cat-select');
-  ms.innerHTML = CATS.map(c => `<option>${c.name}</option>`).join('');
+  document.getElementById('tx-cat-select').innerHTML = CATS.map(c => `<option>${c.name}</option>`).join('');
 }
 
 function quickRecat(id) {
   const t = state.transactions.find(x => x.id === id);
   if (!t) return;
+  // Build a dropdown-style modal for recategorisation
   const cats = CATS.map(c => c.name);
-  const current = cats.indexOf(t.category);
-  const choice = prompt(`Recategorise "${t.description}"\n\nCategories:\n${cats.map((c,i)=>`${i+1}. ${c}`).join('\n')}\n\nEnter number (current: ${current+1}):`);
-  if (choice && cats[parseInt(choice)-1]) {
-    t.category = cats[parseInt(choice)-1];
-    saveStateSync(); renderAll(); renderTransactions();
-    showToast(`Moved to ${t.category}`);
-  }
+  const modal = document.createElement('div');
+  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:2000;display:flex;align-items:flex-end;justify-content:center;';
+  const sheet = document.createElement('div');
+  sheet.style.cssText = 'background:#fff;border-radius:20px 20px 0 0;padding:1.25rem;width:100%;max-width:500px;max-height:80vh;overflow-y:auto;';
+  sheet.innerHTML = `
+    <div style="width:40px;height:4px;background:#ddd;border-radius:2px;margin:0 auto 1rem;"></div>
+    <div style="font-size:0.75rem;font-weight:700;color:#999;text-transform:uppercase;letter-spacing:0.06em;margin-bottom:0.25rem;">Recategorise</div>
+    <div style="font-size:0.95rem;font-weight:700;margin-bottom:1rem;color:#1A1A2E;">${t.description}</div>
+    ${cats.map(cat => {
+      const ci = CATS.find(c=>c.name===cat)||CATS[CATS.length-1];
+      const active = cat === t.category;
+      return `<div onclick="applyRecat('${id}','${cat}',this.closest('.recat-modal'))" class="recat-option"
+        style="display:flex;align-items:center;gap:0.75rem;padding:0.75rem;border-radius:10px;margin-bottom:0.4rem;cursor:pointer;background:${active?'#EEF4FF':'#FAFAFA'};border:1.5px solid ${active?'#0F3460':'#eee'};">
+        <span style="font-size:1.1rem;">${ci.icon}</span>
+        <span style="font-size:0.9rem;font-weight:${active?700:500};color:#1A1A2E;">${cat}</span>
+        ${active?'<span style="margin-left:auto;font-size:0.75rem;color:#0F3460;font-weight:700;">current</span>':''}
+      </div>`;
+    }).join('')}
+    <button onclick="this.closest('.recat-modal').remove()" style="width:100%;padding:0.75rem;margin-top:0.5rem;border:1.5px solid #ddd;border-radius:10px;background:#fff;font-size:0.9rem;cursor:pointer;color:#666;">Cancel</button>`;
+  modal.className = 'recat-modal';
+  modal.appendChild(sheet);
+  modal.addEventListener('click', e => { if(e.target===modal) modal.remove(); });
+  document.body.appendChild(modal);
+}
+function applyRecat(id, newCat, modalEl) {
+  const t = state.transactions.find(x => x.id === id);
+  if (!t) return;
+  learnFromCorrection(t.description, newCat);
+  t.category = newCat;
+  if (modalEl) modalEl.remove();
+  saveStateSync(); renderAll(); renderTransactions();
+  showToast(`Moved to ${newCat} — remembered for next time`);
 }
 
 function openAddTx() {
