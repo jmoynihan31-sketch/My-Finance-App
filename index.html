@@ -1941,12 +1941,15 @@ function updatePlanner() {
   const allocated = rent + fixedOneoffAmt + savingsXfer + goalTotal +
                     groceries + transport + bills + dining + misc;
 
-  // Persist resolved amounts to the week record so Last Week tab can read them
+  // Only persist amounts when user has actually saved a pay figure for this week.
+  // This prevents browsing past weeks in the Pay Planner from overwriting their saved data.
   if (!state.plannerWeeks) state.plannerWeeks = {};
-  if (!state.plannerWeeks[wk]) state.plannerWeeks[wk] = {};
-  state.plannerWeeks[wk].amounts = { savings:savingsXfer, goals:goalTotal,
-    groceries, transport, bills, dining, misc };
-  saveStateSync();
+  const existingRecord = state.plannerWeeks[wk];
+  if (existingRecord && existingRecord.pay && existingRecord.pay !== '') {
+    existingRecord.amounts = { savings:savingsXfer, goals:goalTotal,
+      groceries, transport, bills, dining, misc };
+    saveStateSync();
+  }
   const leftover  = Math.max(0, Math.round((total - allocated) * 100) / 100);
 
   // % indicator — should always be 100
