@@ -792,6 +792,7 @@ const CATS = [
   {name:'Savings Transfer',        icon:'🏦', color:'#27AE60', bg:'#EFE'},
   {name:'Income',                  icon:'💵', color:'#27AE60', bg:'#EFE'},
   {name:'Miscellaneous',           icon:'📦', color:'#7F8C8D', bg:'#F5F5F5'},
+  {name:'Internal Transfer',        icon:'🔄', color:'#BDC3C7', bg:'#F5F5F5'},
 ];
 
 const CAT_KEYWORDS = {
@@ -807,6 +808,7 @@ const CAT_KEYWORDS = {
   'Clothing & Personal':    ['kmart','target','big w','myer','david jones','cotton on','uniqlo','h&m','bonds','city beach','beauty','haircut','barber','salon','nail'],
   'Savings Transfer':        ['savings','transfer to','move to'],
   'Income':                  ['salary','payroll','employer','wage','pay credit'],
+  'Internal Transfer':       ['transfer to savings','transfer from savings','tfr savings','savings to debit','debit to savings','own transfer','internal'],
 };
 
 let state = {
@@ -1069,6 +1071,24 @@ function showToast(msg) {
 function openModal(id) { document.getElementById(id).classList.add('open'); }
 function closeModal(id) { document.getElementById(id).classList.remove('open'); }
 function catInfo(name) { return CATS.find(c => c.name === name) || CATS[CATS.length-1]; }
+// Transactions to exclude from ALL financial calculations
+function isInternalTransfer(t) {
+  return t.category === 'Internal Transfer';
+}
+// Transactions to exclude from SPEND calculations
+// (internal transfers + income credits should not count as spend)
+function isRealSpend(t) {
+  return t.debit > 0 && !isInternalTransfer(t);
+}
+// Real income = credits that are not internal transfers
+function isRealIncome(t) {
+  return t.credit > 0 && !isInternalTransfer(t);
+}
+// Real savings = Savings Transfer debits that are not internal
+function isRealSaving(t) {
+  return t.category === 'Savings Transfer' && t.debit > 0 && !isInternalTransfer(t);
+}
+
 function autoCategory(desc) {
   const d = desc.toLowerCase();
   // Check learned rules first (user corrections take priority)
@@ -1376,10 +1396,10 @@ function renderDashboard() {
 
   // Filter transactions for selected week
   const txs = state.transactions.filter(t => getWeekKey(t.date) === wk);
-  const totalSpend = txs.reduce((a,t) => a + t.debit, 0);
-  const totalIncome = txs.reduce((a,t) => a + t.credit, 0);
-  const totalSaved = txs.filter(t => t.category === 'Savings Transfer').reduce((a,t) => a + t.debit, 0);
-  const netFlow = totalIncome - totalSpend;
+  const totalSpend  = txs.filter(isRealSpend).reduce((a,t) => a + t.debit, 0);
+  const totalIncome = txs.filter(isRealIncome).reduce((a,t) => a + t.credit, 0);
+  const totalSaved  = txs.filter(isRealSaving).reduce((a,t) => a + t.debit, 0);
+  const netFlow     = totalIncome - totalSpend;
 
   // KPIs for this week
   document.getElementById('dash-kpis').innerHTML = `
@@ -1408,7 +1428,7 @@ function renderDashboard() {
 
   // Category breakdown for this week
   const catTotals = {};
-  txs.forEach(t => { if (t.debit > 0) catTotals[t.category] = (catTotals[t.category]||0) + t.debit; });
+  txs.filter(isRealSpend).forEach(t => { catTotals[t.category] = (catTotals[t.category]||0) + t.debit; });
   const sorted = Object.entries(catTotals).sort((a,b) => b[1]-a[1]);
   const maxCat = sorted[0]?.[1] || 1;
   document.getElementById('dash-cats').innerHTML = sorted.length ? sorted.map(([cat, amt]) => {
@@ -1442,17 +1462,20 @@ function renderDashboard() {
 function txRow(t) {
   const ci = catInfo(t.category);
   const isDebit = t.debit > 0;
-  return `<div class="tx-item">
-    <div class="tx-icon" style="background:${ci.bg};">${ci.icon}</div>
-    <div class="tx-info">
-      <div class="tx-desc">${t.description}</div>
-      <div class="tx-meta">${t.date} · <span class="tx-cat-badge" onclick="quickRecat('${t.id}')">${t.category}</span></div>
-    </div>
-    <div>
-      <div class="tx-amount ${isDebit?'debit':'credit'}">${isDebit?'-':'+'} ${fmt(isDebit?t.debit:t.credit)}</div>
-      <div style="text-align:right;margin-top:0.15rem;font-size:0.7rem;color:var(--text2);">${t.account}</div>
-    </div>
-  </div>`;
+  const isInternal = isInternalTransfer(t);
+  return '<div class="tx-item"' + (isInternal ? ' style="opacity:0.5;"' : '') + '>' +
+    '<div class="tx-icon" style="background:' + ci.bg + ';">' + ci.icon + '</div>' +
+    '<div class="tx-info">' +
+      '<div class="tx-desc">' + t.description + '</div>' +
+      '<div class="tx-meta">' + t.date + ' · <span class="tx-cat-badge" onclick="quickRecat(\"' + t.id + '\'">' + t.category + '</span>' +
+      (isInternal ? ' <span style="font-size:0.65rem;color:var(--text2);font-style:italic;">excluded from totals</span>' : '') +
+      '</div>' +
+    '</div>' +
+    '<div>' +
+      '<div class="tx-amount ' + (isDebit ? 'debit' : 'credit') + '">' + (isDebit ? '-' : '+') + ' ' + fmt(isDebit ? t.debit : t.credit) + '</div>' +
+      '<div style="text-align:right;margin-top:0.15rem;font-size:0.7rem;color:var(--text2);">' + t.account + '</div>' +
+    '</div>' +
+  '</div>';
 }
 
 function miniGoal(g) {
@@ -1504,8 +1527,8 @@ function renderTransactions() {
 
   document.getElementById('tx-list').innerHTML = weekKeys.map(wk => {
     const weekTxs = groups[wk];
-    const totalDebit  = weekTxs.reduce((a,t) => a+t.debit, 0);
-    const totalCredit = weekTxs.reduce((a,t) => a+t.credit, 0);
+    const totalDebit  = weekTxs.filter(isRealSpend).reduce((a,t) => a+t.debit, 0);
+    const totalCredit = weekTxs.filter(isRealIncome).reduce((a,t) => a+t.credit, 0);
     const isCurrent = wk === currentWeekKey();
     return `<div style="margin-bottom:1rem;">
       <div style="display:flex;justify-content:space-between;align-items:center;padding:0.5rem 0.25rem;margin-bottom:0.25rem;">
@@ -2184,10 +2207,10 @@ function renderPlannerVsActual(wk, rows, amounts) {
   // Actual spending for this week from transactions
   const weekTxs = state.transactions.filter(t => getWeekKey(t.date) === wk);
   const actualMap = {};
-  weekTxs.forEach(t => {
-    if (t.debit > 0) actualMap[t.category] = (actualMap[t.category] || 0) + t.debit;
+  weekTxs.filter(isRealSpend).forEach(t => {
+    actualMap[t.category] = (actualMap[t.category] || 0) + t.debit;
   });
-  const actualIncome = weekTxs.reduce((a,t) => a + t.credit, 0);
+  const actualIncome = weekTxs.filter(isRealIncome).reduce((a,t) => a + t.credit, 0);
 
   const hasActual = weekTxs.length > 0;
   const vsEl = document.getElementById('planner-vs-actual');
@@ -2356,15 +2379,15 @@ function renderLastWeek() {
     ? (plannerAmounts.savings || Math.round(plannedTotal * s.savingsPct * 100)/100)
     : Math.round(plannedTotal * s.savingsPct * 100)/100;
 
-  const lastIncome = lastTxs.reduce((a,t) => a + t.credit, 0);
-  const lastSpend  = lastTxs.reduce((a,t) => a + t.debit, 0);
-  const lastSaved  = lastTxs.filter(t => t.category === 'Savings Transfer').reduce((a,t) => a + t.debit, 0);
+  const lastIncome = lastTxs.filter(isRealIncome).reduce((a,t) => a + t.credit, 0);
+  const lastSpend  = lastTxs.filter(isRealSpend).reduce((a,t) => a + t.debit, 0);
+  const lastSaved  = lastTxs.filter(isRealSaving).reduce((a,t) => a + t.debit, 0);
   const lastNet    = lastIncome - lastSpend;
   const metSavings = lastSaved >= plannedSavings && plannedSavings > 0;
 
   // Category breakdown — actual spend from transactions
   const catTotals = {};
-  lastTxs.forEach(t => { if (t.debit > 0) catTotals[t.category] = (catTotals[t.category]||0) + t.debit; });
+  lastTxs.filter(isRealSpend).forEach(t => { catTotals[t.category] = (catTotals[t.category]||0) + t.debit; });
 
   // Score (0-100) based on planner budgets
   let score = 100;
