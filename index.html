@@ -440,10 +440,19 @@ select.form-input { appearance: none; background-image: url("data:image/svg+xml,
   <!-- PAY PLANNER -->
   <div class="page" id="page-payday">
     <div style="margin-top:1rem;">
+      <!-- Week selector -->
+      <div style="display:flex;align-items:center;justify-content:space-between;background:#fff;border-radius:12px;padding:0.75rem 1rem;box-shadow:0 2px 12px rgba(0,0,0,0.08);margin-bottom:1rem;">
+        <button onclick="navPlannerWeek(-1)" style="background:none;border:none;font-size:1.3rem;cursor:pointer;padding:0.25rem 0.5rem;color:var(--accent);">‹</button>
+        <div style="text-align:center;flex:1;">
+          <div style="font-size:0.65rem;font-weight:700;color:var(--text2);text-transform:uppercase;letter-spacing:0.08em;">Pay Week</div>
+          <div style="font-size:0.9rem;font-weight:700;color:var(--text);" id="planner-week-label">This week</div>
+        </div>
+        <button onclick="navPlannerWeek(1)" id="planner-next-btn" style="background:none;border:none;font-size:1.3rem;cursor:pointer;padding:0.25rem 0.5rem;color:var(--accent);">›</button>
+      </div>
       <div class="card" style="background:var(--dark);color:#fff;">
         <div style="font-size:0.75rem;opacity:0.7;text-transform:uppercase;letter-spacing:0.08em;margin-bottom:0.25rem;">Thursday Pay Planner</div>
         <div style="font-size:1.5rem;font-weight:800;" id="planner-date"></div>
-        <div style="font-size:0.85rem;opacity:0.7;margin-top:0.25rem;">Enter today's pay to get your full split</div>
+        <div style="font-size:0.85rem;opacity:0.7;margin-top:0.25rem;" id="planner-date-sub">Enter this week's pay to get your full split</div>
       </div>
 
       <div class="planner-section">
@@ -493,6 +502,11 @@ select.form-input { appearance: none; background-image: url("data:image/svg+xml,
       <div class="planner-section" id="planner-habits" style="display:none;">
         <div style="font-size:0.8rem;font-weight:700;color:var(--text2);text-transform:uppercase;letter-spacing:0.06em;margin-bottom:0.75rem;">📈 Recent Spending vs Budget</div>
         <div id="planner-habit-rows"></div>
+      </div>
+
+      <div class="planner-section" id="planner-vs-actual" style="display:none;">
+        <div style="font-size:0.8rem;font-weight:700;color:var(--text2);text-transform:uppercase;letter-spacing:0.06em;margin-bottom:0.75rem;">📊 Plan vs Actual Spending</div>
+        <div id="planner-vs-rows"></div>
       </div>
 
       <div class="planner-section">
@@ -810,6 +824,7 @@ let state = {
   selectedWeekKey: null
 };
 let currentDashWeek = null;
+let currentPlannerWeek = null;
 
 let pendingImport = [];
 let setupPinBuffer = '';
@@ -1579,33 +1594,87 @@ function saveTx() {
 // ════════════════════════════════════════════════════════════
 // PAY PLANNER
 // ════════════════════════════════════════════════════════════
+function navPlannerWeek(dir) {
+  const txWeeks = getAllWeekKeys();
+  const plannerWeekKeys = Object.keys(state.plannerWeeks || {});
+  const allKeys = [...new Set([...txWeeks, ...plannerWeekKeys, currentWeekKey()])].sort((a,b) => b.localeCompare(a));
+  if (!currentPlannerWeek) currentPlannerWeek = currentWeekKey();
+  const idx = allKeys.indexOf(currentPlannerWeek);
+  const newIdx = idx - dir;
+  if (newIdx < 0 || newIdx >= allKeys.length) return;
+  currentPlannerWeek = allKeys[newIdx];
+  renderPayday();
+}
+
 function renderPayday() {
-  const now = new Date();
-  const bneStr = brisbaneToday(); const [by,bm,bd] = bneStr.split('-').map(Number); const bneDate = new Date(Date.UTC(by,bm-1,bd));
-  document.getElementById('planner-date').textContent = bneDate.toLocaleDateString('en-AU',{weekday:'long',day:'numeric',month:'long',year:'numeric',timeZone:'UTC'});
-  // Restore last entered values, fall back to setup defaults
-  const ps = state.plannerSession || {};
-  document.getElementById('planner-pay').value    = ps.pay    || state.settings.weeklyPay || '';
-  document.getElementById('planner-extra').value  = ps.extra  || '0';
-  document.getElementById('planner-oneoff').value = ps.oneoff || '0';
-  if (ps.rent !== undefined) document.getElementById('planner-rent').value = ps.rent;
-  const rentDueChecklist = document.getElementById('planner-rent') && document.getElementById('planner-rent').value === '1';
-  const checks = [rentDueChecklist ? 'Transfer full rent (' + fmt(state.settings.rent) + ') to landlord tonight' : 'Move half rent (' + fmt(state.settings.rent/2) + ') to your rent savings pot', 'Move savings target to savings account',
-    'Allocate goal contributions to sub-accounts', 'Log all this week\'s transactions',
-    'Review last week\'s spending vs budget', 'Check savings goals progress', 'Set spending limit for the week'];
+  if (!currentPlannerWeek) currentPlannerWeek = currentWeekKey();
+  const wk = currentPlannerWeek;
+  const isCurrentWk = wk === currentWeekKey();
+
+  // Week nav label
+  const labelEl = document.getElementById('planner-week-label');
+  if (labelEl) labelEl.textContent = (isCurrentWk ? 'This week: ' : '') + getWeekLabel(wk);
+  const nextBtn = document.getElementById('planner-next-btn');
+  if (nextBtn) {
+    const txWeeks = getAllWeekKeys();
+    const allKeys = [...new Set([...txWeeks, ...Object.keys(state.plannerWeeks||{}), currentWeekKey()])].sort((a,b)=>b.localeCompare(a));
+    const idx = allKeys.indexOf(wk);
+    nextBtn.style.opacity = idx === 0 ? '0.3' : '1';
+    nextBtn.style.pointerEvents = idx === 0 ? 'none' : 'auto';
+  }
+
+  // Header — show Thursday of this week
+  const [wy, wm, wd] = wk.split('-').map(Number);
+  const thuDate = new Date(Date.UTC(wy, wm-1, wd));
+  document.getElementById('planner-date').textContent = thuDate.toLocaleDateString('en-AU',{weekday:'long',day:'numeric',month:'long',year:'numeric',timeZone:'UTC'});
+  const subEl = document.getElementById('planner-date-sub');
+  if (subEl) subEl.textContent = isCurrentWk ? "Enter this week's pay to get your full split" : 'Viewing saved plan for this week';
+
+  // Restore saved data for this week
+  const pw = ((state.plannerWeeks || {})[wk]) || state.plannerSession || {};
+  document.getElementById('planner-pay').value    = pw.pay    || state.settings.weeklyPay || '';
+  document.getElementById('planner-extra').value  = pw.extra  || '0';
+  document.getElementById('planner-oneoff').value = pw.oneoff || '0';
+  if (pw.rent !== undefined) document.getElementById('planner-rent').value = pw.rent;
+
+  // Load this week's split overrides
+  if (pw.overrides && Object.keys(pw.overrides).length > 0) {
+    splitOverrides = JSON.parse(JSON.stringify(pw.overrides));
+  } else if (isCurrentWk) {
+    splitOverrides = JSON.parse(JSON.stringify(state.plannerOverrides || {}));
+  } else {
+    splitOverrides = {};
+  }
+
+  const rentDueChecklist = document.getElementById('planner-rent').value === '1';
+  const checks = [
+    rentDueChecklist ? 'Transfer full rent (' + fmt(state.settings.rent) + ') to landlord tonight' : 'Move half rent (' + fmt(state.settings.rent/2) + ') to your rent savings pot',
+    'Move savings target to savings account',
+    'Allocate goal contributions to sub-accounts',
+    "Log all this week's transactions",
+    "Review last week's spending vs budget",
+    'Check savings goals progress',
+    'Set spending limit for the week'
+  ];
   document.getElementById('planner-checklist').innerHTML = checks.map((c,i) => {
-    const done = state.checklistState[`check_${i}`];
-    return `<div class="checklist-item">
-      <div class="check-box ${done?'done':''}" onclick="toggleCheck(${i})"><span>${done?'✓':''}</span></div>
-      <div class="check-text ${done?'done':''}">${c}</div>
-    </div>`;
+    const key = wk + '_check_' + i;
+    const done = (state.checklistState || {})[key];
+    return '<div class="checklist-item">' +
+      '<div class="check-box ' + (done ? 'done' : '') + '" onclick="toggleCheckWeek(' + JSON.stringify(wk) + ',' + i + ')"><span>' + (done ? '\u2713' : '') + '</span></div>' +
+      '<div class="check-text ' + (done ? 'done' : '') + '">' + c + '</div>' +
+    '</div>';
   }).join('');
   updatePlanner();
 }
-
 function toggleCheck(i) {
-  state.checklistState[`check_${i}`] = !state.checklistState[`check_${i}`];
-  saveState(); renderPayday();
+  const wk = currentPlannerWeek || currentWeekKey();
+  toggleCheckWeek(wk, i);
+}
+function toggleCheckWeek(wk, i) {
+  if (!state.checklistState) state.checklistState = {};
+  const key = wk + '_check_' + i;
+  state.checklistState[key] = !state.checklistState[key];
+  saveStateSync(); renderPayday();
 }
 
 // track which rows are in edit mode and custom overrides
@@ -1629,6 +1698,11 @@ function setSplitOverride(key, pctVal) {
   const cappedPct = Math.min(pct / 100, 1.0);
   splitOverrides[key] = { pct: cappedPct };
   state.plannerOverrides = JSON.parse(JSON.stringify(splitOverrides));
+  // Also persist to per-week record
+  const wk = currentPlannerWeek || currentWeekKey();
+  if (!state.plannerWeeks) state.plannerWeeks = {};
+  if (!state.plannerWeeks[wk]) state.plannerWeeks[wk] = {};
+  state.plannerWeeks[wk].overrides = JSON.parse(JSON.stringify(splitOverrides));
   saveStateSync();
   updatePlanner();
 }
@@ -1683,12 +1757,18 @@ function computeGoalSplit(totalPay) {
 }
 
 function savePlannerSession() {
-  state.plannerSession = {
+  const wk = currentPlannerWeek || currentWeekKey();
+  const record = {
     pay:    document.getElementById('planner-pay').value,
     extra:  document.getElementById('planner-extra').value,
     oneoff: document.getElementById('planner-oneoff').value,
     rent:   document.getElementById('planner-rent').value,
+    overrides: JSON.parse(JSON.stringify(splitOverrides)),
   };
+  // Save both the per-week record and update legacy plannerSession
+  if (!state.plannerWeeks) state.plannerWeeks = {};
+  state.plannerWeeks[wk] = record;
+  state.plannerSession = record;
   saveStateSync();
 }
 
@@ -1699,6 +1779,7 @@ function onPayChange() {
 }
 
 function updatePlanner() {
+  const wk = currentPlannerWeek || currentWeekKey();
   const pay = parseFloat(document.getElementById('planner-pay').value) || 0;
   const extra = parseFloat(document.getElementById('planner-extra').value) || 0;
   const oneoff = parseFloat(document.getElementById('planner-oneoff').value) || 0;
@@ -1978,25 +2059,138 @@ function updatePlanner() {
   const goalSecEl = document.getElementById('planner-goals-section');
   if (goalSecEl) goalSecEl.style.display = 'none';
 
-  // ── Habits ──
-  const allWeekKeys = getAllWeekKeys();
-  const wkCount = Math.max(allWeekKeys.length, 1);
-  const catTotals = {};
-  state.transactions.forEach(t => { if (t.debit > 0) catTotals[t.category] = (catTotals[t.category] || 0) + t.debit; });
-  const habitCats = ['Groceries & Supermarket', 'Dining & Takeaway', 'Transport & Fuel', 'Entertainment & Subs', 'Miscellaneous'];
-  document.getElementById('planner-habit-rows').innerHTML = habitCats.map(cat => {
-    const avg = (catTotals[cat] || 0) / wkCount;
-    const bud = s.budgets[cat] || 0;
-    const over = bud > 0 && avg > bud;
-    return '<div class="planner-row">' +
+  // ── Plan vs Actual spending for this week ──
+  renderPlannerVsActual(wk, rows, amounts);
+}
+
+function renderPlannerVsActual(wk, rows, amounts) {
+  // Map plan rows to categories so we can compare to actual tx spend
+  const planMap = {
+    'Groceries & Supermarket': amounts.groceries || 0,
+    'Dining & Takeaway':       amounts.dining    || 0,
+    'Transport & Fuel':        amounts.transport || 0,
+    'Utilities & Bills':       amounts.bills     || 0,
+    'Miscellaneous':           amounts.misc      || 0,
+    'Savings Transfer':        amounts.savings   || 0,
+    'Entertainment & Subs':    0,
+    'Health & Medical':        0,
+    'Clothing & Personal':     0,
+  };
+
+  // Actual spending for this week from transactions
+  const weekTxs = state.transactions.filter(t => getWeekKey(t.date) === wk);
+  const actualMap = {};
+  weekTxs.forEach(t => {
+    if (t.debit > 0) actualMap[t.category] = (actualMap[t.category] || 0) + t.debit;
+  });
+  const actualIncome = weekTxs.reduce((a,t) => a + t.credit, 0);
+
+  const hasActual = weekTxs.length > 0;
+  const vsEl = document.getElementById('planner-vs-actual');
+  vsEl.style.display = 'block';
+
+  // Show income comparison first
+  const plannedPay = parseFloat(document.getElementById('planner-pay').value) || 0;
+  const plannedExtra = parseFloat(document.getElementById('planner-extra').value) || 0;
+  const plannedTotal = plannedPay + plannedExtra;
+
+  // Build comparison rows for categories that have a plan or actual spend
+  const compareCats = [
+    { cat: 'Groceries & Supermarket', icon: '🟢' },
+    { cat: 'Dining & Takeaway',       icon: '🔵' },
+    { cat: 'Transport & Fuel',        icon: '⛽' },
+    { cat: 'Utilities & Bills',       icon: '💡' },
+    { cat: 'Entertainment & Subs',    icon: '🎬' },
+    { cat: 'Health & Medical',        icon: '❤️' },
+    { cat: 'Clothing & Personal',     icon: '👗' },
+    { cat: 'Miscellaneous',           icon: '📦' },
+  ];
+
+  const incomeRow = hasActual ?
+    '<div style="display:flex;justify-content:space-between;align-items:center;padding:0.5rem 0.6rem;background:#EAF7EA;border-radius:8px;margin-bottom:0.5rem;">' +
       '<div>' +
-        '<span style="font-size:0.875rem;">' + catInfo(cat).icon + ' ' + cat + '</span>' +
-        '<div style="font-size:0.7rem;color:var(--text2);">Budget: ' + fmt(bud) + '/wk</div>' +
+        '<div style="font-size:0.8rem;font-weight:700;">💵 Income</div>' +
+        '<div style="font-size:0.68rem;color:var(--text2);">Planned vs received</div>' +
       '</div>' +
-      '<span style="font-size:0.875rem;font-weight:700;color:' + (over ? 'var(--red)' : 'var(--green)') + ';">' + fmt(avg) + '/wk ' + (over ? '⚠️' : '✅') + '</span>' +
+      '<div style="display:flex;gap:1rem;align-items:center;">' +
+        '<div style="text-align:right;">' +
+          '<div style="font-size:0.68rem;color:var(--text2);">Planned</div>' +
+          '<div style="font-size:0.85rem;font-weight:700;">' + fmt(plannedTotal) + '</div>' +
+        '</div>' +
+        '<div style="text-align:right;">' +
+          '<div style="font-size:0.68rem;color:var(--text2);">Actual</div>' +
+          '<div style="font-size:0.85rem;font-weight:700;color:var(--green);">' + fmt(actualIncome) + '</div>' +
+        '</div>' +
+        '<div style="text-align:right;min-width:52px;">' +
+          '<div style="font-size:0.68rem;color:var(--text2);">Diff</div>' +
+          '<div style="font-size:0.85rem;font-weight:800;color:' + (actualIncome >= plannedTotal ? 'var(--green)' : 'var(--red)') + ';">' +
+            (actualIncome >= plannedTotal ? '+' : '') + fmt(actualIncome - plannedTotal) +
+          '</div>' +
+        '</div>' +
+      '</div>' +
+    '</div>' : '';
+
+  const catRows = compareCats.map(({cat, icon}) => {
+    const planned = planMap[cat] || 0;
+    const actual  = actualMap[cat] || 0;
+    if (planned === 0 && actual === 0) return '';
+    const diff = actual - planned;
+    const over = diff > 0.5;
+    const under = diff < -0.5;
+    const pct = planned > 0 ? Math.min(100, actual / planned * 100) : (actual > 0 ? 100 : 0);
+    const barColor = over ? 'var(--red)' : 'var(--green)';
+    return '<div style="margin-bottom:0.75rem;">' +
+      '<div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:0.25rem;">' +
+        '<div style="font-size:0.82rem;font-weight:600;">' + icon + ' ' + cat + '</div>' +
+        '<div style="display:flex;gap:0.75rem;align-items:center;">' +
+          '<div style="text-align:right;">' +
+            '<div style="font-size:0.65rem;color:var(--text2);">Planned</div>' +
+            '<div style="font-size:0.8rem;font-weight:600;">' + fmt(planned) + '</div>' +
+          '</div>' +
+          (hasActual ? '<div style="text-align:right;">' +
+            '<div style="font-size:0.65rem;color:var(--text2);">Actual</div>' +
+            '<div style="font-size:0.8rem;font-weight:700;color:' + (over ? 'var(--red)' : 'var(--text)') + ';">' + fmt(actual) + '</div>' +
+          '</div>' +
+          '<div style="text-align:right;min-width:48px;">' +
+            '<div style="font-size:0.65rem;color:var(--text2);">Diff</div>' +
+            '<div style="font-size:0.8rem;font-weight:800;color:' + (over ? 'var(--red)' : under ? 'var(--green)' : 'var(--text2)') + ';">' +
+              (diff > 0 ? '+' : '') + fmt(diff) +
+            '</div>' +
+          '</div>' : '') +
+        '</div>' +
+      '</div>' +
+      '<div style="background:#eee;border-radius:20px;height:5px;overflow:hidden;">' +
+        '<div style="width:' + Math.min(pct, 100) + '%;height:100%;background:' + barColor + ';border-radius:20px;transition:width 0.4s;"></div>' +
+      '</div>' +
     '</div>';
   }).join('');
-  document.getElementById('planner-habits').style.display = 'block';
+
+  const noDataNote = !hasActual ?
+    '<div style="font-size:0.78rem;color:var(--text2);font-style:italic;text-align:center;padding:0.5rem 0;">' +
+      'No transactions found for this week yet — import your CSV to see actual spending' +
+    '</div>' : '';
+
+  // Total planned vs actual spend
+  const totalPlanned = Object.values(planMap).reduce((a,b) => a+b, 0);
+  const totalActual  = Object.values(actualMap).reduce((a,b) => a+b, 0);
+  const totalDiff    = totalActual - totalPlanned;
+
+  const summaryRow = hasActual ?
+    '<div style="display:flex;justify-content:space-between;align-items:center;padding:0.6rem 0.6rem;background:var(--dark);border-radius:8px;color:#fff;margin-top:0.25rem;">' +
+      '<div style="font-size:0.8rem;font-weight:700;">Total spending</div>' +
+      '<div style="display:flex;gap:0.75rem;align-items:center;">' +
+        '<div style="text-align:right;opacity:0.7;font-size:0.75rem;">' + fmt(totalPlanned) + ' planned</div>' +
+        '<div style="text-align:right;font-size:0.9rem;font-weight:800;color:' + (totalDiff > 0 ? '#ff8888' : '#88ff88') + ';">' +
+          (totalDiff > 0 ? '⚠️ +' : '✅ ') + fmt(totalDiff) +
+        '</div>' +
+      '</div>' +
+    '</div>' : '';
+
+  document.getElementById('planner-vs-rows').innerHTML = incomeRow + catRows + noDataNote + summaryRow;
+
+  // Hide old habits section — replaced by vs-actual
+  const habitsEl = document.getElementById('planner-habits');
+  if (habitsEl) habitsEl.style.display = 'none';
 }
 // ════════════════════════════════════════════════════════════
 // LAST WEEK PERFORMANCE
