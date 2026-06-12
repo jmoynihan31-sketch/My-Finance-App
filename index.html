@@ -1782,17 +1782,72 @@ function computeGoalSplit(totalPay) {
 
 function savePlannerSession() {
   const wk = currentPlannerWeek || currentWeekKey();
+
+  // Compute current resolved amounts so they are snapshotted at save time
+  const pay    = parseFloat(document.getElementById('planner-pay').value) || 0;
+  const extra  = parseFloat(document.getElementById('planner-extra').value) || 0;
+  const oneoff = parseFloat(document.getElementById('planner-oneoff').value) || 0;
+  const rentDue = document.getElementById('planner-rent').value === '1';
+  const total  = pay + extra;
+  const s      = state.settings;
+
+  // Replicate the priority allocation logic (same as updatePlanner) to get amounts
+  const weeklyRentAmt  = Math.round(s.rent / 2 * 100) / 100;
+  const fixedOneoffAmt = oneoff;
+  const afterFixed     = Math.max(0, total - weeklyRentAmt - fixedOneoffAmt);
+
+  // Default amounts
+  const defSavings  = Math.round(total * s.savingsPct * 100) / 100;
+  // Use a simple goal total estimate (exact value computed in updatePlanner; use stored or default)
+  const storedAmts  = ((state.plannerWeeks || {})[wk] || {}).amounts || {};
+  const defGoals    = storedAmts.goals !== undefined ? storedAmts.goals : 0;
+
+  const defaults = {
+    savings:   defSavings,
+    goals:     defGoals,
+    groceries: s.budgets['Groceries & Supermarket'] || 0,
+    transport: s.budgets['Transport & Fuel'] || 0,
+    bills:     s.budgets['Utilities & Bills'] || 0,
+    dining:    s.budgets['Dining & Takeaway'] || 0,
+    misc:      s.budgets['Miscellaneous'] || 0,
+  };
+  const PRIORITY     = ['savings','goals','groceries','transport','bills','dining','misc'];
+  const squeezeOrder = [...PRIORITY].reverse();
+
+  let amounts = {};
+  PRIORITY.forEach(k => {
+    const ov = splitOverrides[k];
+    amounts[k] = (ov && ov.pct !== undefined)
+      ? Math.round(ov.pct * total * 100) / 100
+      : defaults[k];
+  });
+
+  // Enforce afterFixed cap
+  const sumFlex = () => PRIORITY.reduce((a, k) => a + amounts[k], 0);
+  let overage = sumFlex() - afterFixed;
+  if (overage > 0.005) {
+    for (const k of squeezeOrder) {
+      if (overage <= 0.005) break;
+      const cut = Math.min(amounts[k], overage);
+      amounts[k] = Math.max(0, Math.round((amounts[k] - cut) * 100) / 100);
+      overage -= cut;
+    }
+  }
+  const slack = afterFixed - sumFlex();
+  if (slack > 0.005) amounts.misc = Math.round((amounts.misc + slack) * 100) / 100;
+
   const record = {
     pay:    document.getElementById('planner-pay').value,
     extra:  document.getElementById('planner-extra').value,
     oneoff: document.getElementById('planner-oneoff').value,
     rent:   document.getElementById('planner-rent').value,
     overrides: JSON.parse(JSON.stringify(splitOverrides)),
+    amounts:   amounts,   // ← snapshotted at save time, not on every render
   };
-  // Save both the per-week record and update legacy plannerSession
+
   if (!state.plannerWeeks) state.plannerWeeks = {};
   state.plannerWeeks[wk] = record;
-  state.plannerSession = record;
+  state.plannerSession   = record;
   saveStateSync();
 }
 
@@ -1941,15 +1996,9 @@ function updatePlanner() {
   const allocated = rent + fixedOneoffAmt + savingsXfer + goalTotal +
                     groceries + transport + bills + dining + misc;
 
-  // Only persist amounts when user has actually saved a pay figure for this week.
-  // This prevents browsing past weeks in the Pay Planner from overwriting their saved data.
-  if (!state.plannerWeeks) state.plannerWeeks = {};
-  const existingRecord = state.plannerWeeks[wk];
-  if (existingRecord && existingRecord.pay && existingRecord.pay !== '') {
-    existingRecord.amounts = { savings:savingsXfer, goals:goalTotal,
-      groceries, transport, bills, dining, misc };
-    saveStateSync();
-  }
+  // amounts are NOT persisted here — they are snapshotted in savePlannerSession()
+  // only when the user explicitly saves (types in pay field, changes inputs).
+  // This prevents browsing past weeks from ever touching stored data.
   const leftover  = Math.max(0, Math.round((total - allocated) * 100) / 100);
 
   // % indicator — should always be 100
