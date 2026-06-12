@@ -1467,7 +1467,7 @@ function txRow(t) {
     '<div class="tx-icon" style="background:' + ci.bg + ';">' + ci.icon + '</div>' +
     '<div class="tx-info">' +
       '<div class="tx-desc">' + t.description + '</div>' +
-      '<div class="tx-meta">' + t.date + ' · <span class="tx-cat-badge" onclick="quickRecat(\"' + t.id + '\'">' + t.category + '</span>' +
+      '<div class="tx-meta">' + t.date + ' · <span class="tx-cat-badge" data-txid="' + t.id + '" onclick="quickRecat(this.dataset.txid)">' + t.category + '</span>' +
       (isInternal ? ' <span style="font-size:0.65rem;color:var(--text2);font-style:italic;">excluded from totals</span>' : '') +
       '</div>' +
     '</div>' +
