@@ -480,8 +480,12 @@ select.form-input { appearance: none; background-image: url("data:image/svg+xml,
             style="-webkit-appearance:none;appearance:none;position:absolute;top:0;right:0;font-size:0.8rem;font-weight:700;color:var(--accent);background:#EEF4FF;border:1.5px solid var(--accent);border-radius:8px;padding:0.3rem 0.85rem;cursor:pointer;line-height:1.4;min-width:52px;text-align:center;touch-action:manipulation;">Edit</button>
         </div>
         <div id="planner-rows"></div>
+        <div style="display:flex;justify-content:space-between;align-items:center;padding:0.4rem 0 0.5rem;margin-top:0.25rem;">
+          <span style="font-size:0.75rem;font-weight:700;color:var(--text2);" id="planner-total-pct">0% allocated</span>
+          <span style="font-size:0.7rem;color:var(--text2);">↑ auto-balanced to 100%</span>
+        </div>
         <div class="planner-total">
-          <span style="font-size:0.85rem;font-weight:700;">Leftover → Savings</span>
+          <span style="font-size:0.85rem;font-weight:700;">Unallocated → Extra savings</span>
           <span style="font-size:1.1rem;font-weight:800;" id="planner-leftover">$0.00</span>
         </div>
       </div>
@@ -1619,7 +1623,11 @@ function setSplitOverride(key, pctVal) {
   // pctVal is 0-100 (percentage of total pay)
   const pct = parseFloat(pctVal);
   if (isNaN(pct) || pct < 0) return;
-  splitOverrides[key] = { pct: Math.min(pct, 100) / 100 };
+  const total = (parseFloat(document.getElementById('planner-pay').value) || 0) +
+                (parseFloat(document.getElementById('planner-extra').value) || 0);
+  // Cap at 100% of total pay
+  const cappedPct = Math.min(pct / 100, 1.0);
+  splitOverrides[key] = { pct: cappedPct };
   state.plannerOverrides = JSON.parse(JSON.stringify(splitOverrides));
   saveStateSync();
   updatePlanner();
@@ -1727,17 +1735,89 @@ function updatePlanner() {
   const goalSplit = computeGoalSplit(total);
   const defGoals = Math.round(goalSplit.reduce((a, d) => a + d.allocated, 0) * 100) / 100;
 
-  const rent        = resolveOverride('rent',      defRent,                                        total);
-  const savingsXfer = resolveOverride('savings',   defSavings,                                     total);
-  const goalTotal   = resolveOverride('goals',     defGoals,                                       total);
-  const groceries   = resolveOverride('groceries', s.budgets['Groceries & Supermarket'] || 0,      total);
-  const dining      = resolveOverride('dining',    s.budgets['Dining & Takeaway'] || 0,            total);
-  const transport   = resolveOverride('transport', s.budgets['Transport & Fuel'] || 0,             total);
-  const bills       = resolveOverride('bills',     s.budgets['Utilities & Bills'] || 0,            total);
-  const misc        = resolveOverride('misc',      s.budgets['Miscellaneous'] || 0,                total);
+  // ── Priority-based allocation — always sums to 100% of total pay ──────────
+  // Rent is a FIXED DOLLAR amount (always exactly half fortnightly rent),
+  // NOT a percentage. Extra pay above normal flows to lower-priority items.
+  // One-off bills are also fixed dollar (from the input field above).
+  //
+  // Everything is allocated from the full pay pot (total).
+  // Priority order for squeezing when pay is tight:
+  //   1. rent       ← fixed $, protected first (never reduced)
+  //   2. savings
+  //   3. goals
+  //   4. groceries
+  //   5. transport
+  //   6. bills
+  //   7. oneoff     ← fixed $, protected (user-entered)
+  //   8. dining     ← squeezed second-to-last
+  //   9. misc       ← squeezed first
 
-  const allocated = rent + savingsXfer + goalTotal + oneoff + groceries + dining + transport + bills + misc;
-  const leftover = Math.max(0, total - allocated);
+  const fixedRentAmt   = weeklyRentAmt;   // always exactly s.rent / 2
+  const fixedOneoffAmt = oneoff;          // from input above
+
+  // Available after guaranteed fixed items
+  const afterFixed = Math.max(0, total - fixedRentAmt - fixedOneoffAmt);
+
+  // Default amounts for flexible categories (from budgets / settings)
+  const defaults = {
+    savings:   Math.round(total * s.savingsPct * 100) / 100,
+    goals:     defGoals,
+    groceries: s.budgets['Groceries & Supermarket'] || 0,
+    transport: s.budgets['Transport & Fuel'] || 0,
+    bills:     s.budgets['Utilities & Bills'] || 0,
+    dining:    s.budgets['Dining & Takeaway'] || 0,
+    misc:      s.budgets['Miscellaneous'] || 0,
+  };
+
+  // Priority order — savings first, misc last
+  const PRIORITY = ['savings','goals','groceries','transport','bills','dining','misc'];
+  const squeezeOrder = [...PRIORITY].reverse(); // misc squeezed first
+
+  // Resolve each category: user override (as % of total) or default dollar
+  let amounts = {};
+  PRIORITY.forEach(k => {
+    const ov = splitOverrides[k];
+    if (ov && ov.pct !== undefined) {
+      amounts[k] = Math.round(ov.pct * total * 100) / 100;
+    } else {
+      amounts[k] = defaults[k];
+    }
+  });
+
+  // Enforce: flexible total cannot exceed afterFixed
+  const sumFlexible = () => PRIORITY.reduce((a, k) => a + amounts[k], 0);
+  let overage = sumFlexible() - afterFixed;
+  if (overage > 0.005) {
+    for (const k of squeezeOrder) {
+      if (overage <= 0.005) break;
+      const cut = Math.min(amounts[k], overage);
+      amounts[k] = Math.max(0, Math.round((amounts[k] - cut) * 100) / 100);
+      overage -= cut;
+    }
+  }
+
+  // Assign any rounding slack to misc (so total is exactly 100%)
+  const slack = afterFixed - sumFlexible();
+  if (slack > 0.005) {
+    amounts.misc = Math.round((amounts.misc + slack) * 100) / 100;
+  }
+
+  // Final values
+  const rent        = fixedRentAmt;       // always exactly half fortnightly
+  const savingsXfer = amounts.savings;
+  const goalTotal   = amounts.goals;
+  const groceries   = amounts.groceries;
+  const transport   = amounts.transport;
+  const bills       = amounts.bills;
+  const dining      = amounts.dining;
+  const misc        = amounts.misc;
+
+  const allocated = rent + fixedOneoffAmt + savingsXfer + goalTotal +
+                    groceries + transport + bills + dining + misc;
+  const leftover  = Math.max(0, Math.round((total - allocated) * 100) / 100);
+
+  // % indicator — should always be 100
+  const totalPct = total > 0 ? Math.round(allocated / total * 100) : 0;
 
   document.getElementById('planner-split').style.display = 'block';
 
@@ -1881,10 +1961,17 @@ function updatePlanner() {
     '</div>';
   }).join('') + (splitEditing ?
     '<div style="margin-top:0.75rem;text-align:center;">' +
-      '<button onclick="resetSplitOverrides()" style="font-size:0.75rem;color:var(--text2);background:none;border:1px solid var(--border);border-radius:6px;padding:0.3rem 0.8rem;cursor:pointer;">Reset to recommended</button>' +
+      '<button onclick="resetSplitOverrides()" style="font-size:0.75rem;color:var(--text2);background:none;border:1px solid var(--border);border-radius:6px;padding:0.3rem 0.8rem;cursor:pointer;">↺ Reset to recommended</button>' +
+      '<div style="font-size:0.68rem;color:var(--text2);margin-top:0.4rem;">Adjusting % auto-squeezes Miscellaneous then Dining first</div>' +
     '</div>' : '');
 
   document.getElementById('planner-leftover').textContent = fmt(leftover);
+  // Show total % allocated indicator
+  const pctEl = document.getElementById('planner-total-pct');
+  if (pctEl) {
+    pctEl.textContent = totalPct + '% allocated';
+    pctEl.style.color = totalPct === 100 ? 'var(--green)' : totalPct > 100 ? 'var(--red)' : 'var(--orange)';
+  }
 
   // Goal breakdown is now rendered inline inside the pay split rows above.
   // Hide the separate panel (kept in HTML for backwards compat).
