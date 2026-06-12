@@ -1940,6 +1940,13 @@ function updatePlanner() {
 
   const allocated = rent + fixedOneoffAmt + savingsXfer + goalTotal +
                     groceries + transport + bills + dining + misc;
+
+  // Persist resolved amounts to the week record so Last Week tab can read them
+  if (!state.plannerWeeks) state.plannerWeeks = {};
+  if (!state.plannerWeeks[wk]) state.plannerWeeks[wk] = {};
+  state.plannerWeeks[wk].amounts = { savings:savingsXfer, goals:goalTotal,
+    groceries, transport, bills, dining, misc };
+  saveStateSync();
   const leftover  = Math.max(0, Math.round((total - allocated) * 100) / 100);
 
   // % indicator — should always be 100
@@ -2241,57 +2248,84 @@ function renderPlannerVsActual(wk, rows, amounts) {
 // LAST WEEK PERFORMANCE
 // ════════════════════════════════════════════════════════════
 function renderLastWeek() {
-  const allKeys = getAllWeekKeys();
   const el = document.getElementById('lastweek-content');
-  if (allKeys.length < 2) {
-    el.innerHTML = '<div class="empty"><div class="empty-icon">📅</div><h3>Not enough data yet</h3><p>You need at least 2 weeks of transactions to see last week&#39;s performance.</p></div>';
+  const s  = state.settings;
+
+  // ── Always use the week BEFORE the current Thu-Wed week ──────────────────
+  // Find the week key for 7 days ago (guaranteed to be the previous week)
+  const todayStr = brisbaneToday();
+  const [ty, tm, td] = todayStr.split('-').map(Number);
+  const lastThursdayMs = Date.UTC(ty, tm-1, td) - 7 * 86400000;
+  const lastThursdayStr = new Date(lastThursdayMs).toISOString().split('T')[0];
+  const lastWk = getWeekKey(lastThursdayStr);
+  const thisWk = currentWeekKey();
+
+  const lastTxs = state.transactions.filter(t => getWeekKey(t.date) === lastWk);
+
+  if (!lastTxs.length && !((state.plannerWeeks || {})[lastWk])) {
+    el.innerHTML = '<div class="empty"><div class="empty-icon">📅</div><h3>No data for last week</h3><p>Import your Bendigo CSV for ' + getWeekLabel(lastWk) + ' to see performance.</p></div>';
     return;
   }
 
-  const thisWk  = allKeys[0];
-  const lastWk  = allKeys[1];
-  const s       = state.settings;
+  // ── Pull budgets from the saved pay planner for last week ─────────────────
+  // Falls back to current settings budgets if no planner record saved
+  const plannerRecord = (state.plannerWeeks || {})[lastWk] || {};
+  const plannerAmounts = plannerRecord.amounts || null; // saved from updatePlanner if we persist it
 
-  const lastTxs    = state.transactions.filter(t => getWeekKey(t.date) === lastWk);
-  const thisTxs    = state.transactions.filter(t => getWeekKey(t.date) === thisWk);
+  // Build budget map: prefer planner-saved amounts, fall back to s.budgets
+  // The planner saves amounts in the record — map category names to planner keys
+  const plannerCatMap = {
+    'Groceries & Supermarket': 'groceries',
+    'Dining & Takeaway':       'dining',
+    'Transport & Fuel':        'transport',
+    'Utilities & Bills':       'bills',
+    'Miscellaneous':           'misc',
+    'Savings Transfer':        'savings',
+    'Entertainment & Subs':    null,
+    'Health & Medical':        null,
+    'Clothing & Personal':     null,
+  };
+
+  function getBudget(cat) {
+    // First: try to get from saved planner week amounts
+    if (plannerAmounts) {
+      const key = plannerCatMap[cat];
+      if (key && plannerAmounts[key] !== undefined) return plannerAmounts[key];
+    }
+    // Second: fall back to setup budgets
+    return s.budgets[cat] || 0;
+  }
+
+  // ── Savings goal: use last week planner pay to compute planned savings ────
+  const plannedPay   = parseFloat(plannerRecord.pay   || s.weeklyPay || 0);
+  const plannedExtra = parseFloat(plannerRecord.extra || 0);
+  const plannedTotal = plannedPay + plannedExtra;
+  const plannedSavings = plannerAmounts
+    ? (plannerAmounts.savings || Math.round(plannedTotal * s.savingsPct * 100)/100)
+    : Math.round(plannedTotal * s.savingsPct * 100)/100;
 
   const lastIncome = lastTxs.reduce((a,t) => a + t.credit, 0);
   const lastSpend  = lastTxs.reduce((a,t) => a + t.debit, 0);
   const lastSaved  = lastTxs.filter(t => t.category === 'Savings Transfer').reduce((a,t) => a + t.debit, 0);
   const lastNet    = lastIncome - lastSpend;
+  const metSavings = lastSaved >= plannedSavings && plannedSavings > 0;
 
-  // Goals: what did we plan to save last week vs what was actually transferred
-  const goalSavingsPlanned = state.goals
-    .filter(g => getGoalStatus(g) !== 'COMPLETE' && getGoalStatus(g) !== 'OVERDUE')
-    .reduce((a, g) => {
-      const wks = weeksUntil(g.date) || 52;
-      const needed = Math.max(0, (g.target||0) - (g.saved||0));
-      return a + needed / wks;
-    }, 0);
-
-  const savingsTarget  = lastIncome * s.savingsPct;
-  const totalSavingsGoal = savingsTarget + goalSavingsPlanned;
-  const savingsGap     = lastSaved - totalSavingsGoal;
-  const metSavings     = lastSaved >= totalSavingsGoal;
-
-  // Category breakdown vs budget
+  // Category breakdown — actual spend from transactions
   const catTotals = {};
   lastTxs.forEach(t => { if (t.debit > 0) catTotals[t.category] = (catTotals[t.category]||0) + t.debit; });
 
-  // Score calculation (0-100)
+  // Score (0-100) based on planner budgets
   let score = 100;
   const overBudgetCats = [];
   Object.entries(catTotals).forEach(([cat, amt]) => {
-    const bud = s.budgets[cat] || 0;
+    const bud = getBudget(cat);
     if (bud > 0 && amt > bud) {
-      const overpct = (amt - bud) / bud;
-      score -= Math.min(15, overpct * 30);
-      overBudgetCats.push({ cat, amt, bud, over: amt - bud });
+      score -= Math.min(15, ((amt-bud)/bud) * 30);
+      overBudgetCats.push({ cat, amt, bud, over: amt-bud });
     }
   });
-  if (!metSavings && totalSavingsGoal > 0) {
-    const shortfall = totalSavingsGoal - lastSaved;
-    score -= Math.min(30, (shortfall / totalSavingsGoal) * 40);
+  if (!metSavings && plannedSavings > 0) {
+    score -= Math.min(30, ((plannedSavings-lastSaved)/plannedSavings) * 40);
   }
   score = Math.max(0, Math.round(score));
 
@@ -2299,45 +2333,49 @@ function renderLastWeek() {
   const scoreLabel = score >= 80 ? 'Great week!' : score >= 55 ? 'Room to improve' : 'Tough week';
   const scoreEmoji = score >= 80 ? '🏆' : score >= 55 ? '📈' : '💪';
 
-  // Build insight messages
   const insights = [];
-  if (metSavings) {
-    insights.push({ icon:'✅', color:'var(--green)', msg:'Savings target met — ' + fmt(lastSaved) + ' saved vs goal of ' + fmt(totalSavingsGoal) });
-  } else {
-    insights.push({ icon:'⚠️', color:'var(--red)', msg:'Savings short by ' + fmt(totalSavingsGoal - lastSaved) + ' — goal was ' + fmt(totalSavingsGoal) });
+  if (plannedSavings > 0) {
+    if (metSavings) {
+      insights.push({ icon:'✅', color:'var(--green)', msg:'Savings target met — ' + fmt(lastSaved) + ' saved vs plan of ' + fmt(plannedSavings) });
+    } else {
+      insights.push({ icon:'⚠️', color:'var(--red)', msg:'Savings short by ' + fmt(plannedSavings-lastSaved) + ' — planned ' + fmt(plannedSavings) });
+    }
   }
-  if (overBudgetCats.length === 0) {
-    insights.push({ icon:'✅', color:'var(--green)', msg:'Every category stayed within budget' });
+  if (overBudgetCats.length === 0 && lastTxs.length > 0) {
+    insights.push({ icon:'✅', color:'var(--green)', msg:'Every category stayed within the planned budget' });
   } else {
     overBudgetCats.slice(0,3).forEach(o => {
-      insights.push({ icon:'⚠️', color:'var(--orange)', msg: catInfo(o.cat).icon + ' ' + o.cat + ' over budget by ' + fmt(o.over) + ' (' + fmt(o.amt) + ' vs ' + fmt(o.bud) + ')' });
+      const src = plannerAmounts ? 'planned' : 'budget';
+      insights.push({ icon:'⚠️', color:'var(--orange)', msg: catInfo(o.cat).icon + ' ' + o.cat + ' over ' + src + ' by ' + fmt(o.over) + ' (' + fmt(o.amt) + ' spent vs ' + fmt(o.bud) + ' ' + src + ')' });
     });
   }
   if (lastNet > 0) {
-    insights.push({ icon:'✅', color:'var(--green)', msg:'Positive week — spent ' + fmt(Math.abs(lastNet)) + ' less than you earned' });
+    insights.push({ icon:'✅', color:'var(--green)', msg:'Positive week — income exceeded spending by ' + fmt(lastNet) });
   } else if (lastNet < 0) {
-    insights.push({ icon:'🔴', color:'var(--red)', msg:'Spent more than you earned this week by ' + fmt(Math.abs(lastNet)) });
+    insights.push({ icon:'🔴', color:'var(--red)', msg:'Spent more than earned by ' + fmt(Math.abs(lastNet)) });
   }
 
-  // What to do differently this week
   const actions = [];
   overBudgetCats.slice(0,2).forEach(o => {
-    actions.push('Cut ' + o.cat + ' by ' + fmt(o.over) + ' — budget ' + fmt(o.bud) + '/wk');
+    actions.push('Reduce ' + o.cat + ' by ' + fmt(o.over) + ' this week — stay under ' + fmt(o.bud));
   });
-  if (!metSavings) {
-    actions.push('Increase savings transfer by ' + fmt(totalSavingsGoal - lastSaved) + ' this Thursday');
+  if (!metSavings && plannedSavings > 0) {
+    actions.push('Transfer an extra ' + fmt(plannedSavings-lastSaved) + ' to savings this Thursday to catch up');
   }
-  if (actions.length === 0) actions.push('Keep it up — no adjustments needed!');
+  if (actions.length === 0) actions.push('Keep it up — no adjustments needed this week!');
+
+  const hasPlannerData = !!plannerRecord.pay;
+  const plannerNote = hasPlannerData
+    ? '<div style="font-size:0.7rem;color:var(--text2);margin-bottom:0.75rem;padding:0.4rem 0.6rem;background:#F0F4FF;border-radius:6px;">📋 Budgets from your saved Pay Planner for ' + getWeekLabel(lastWk) + '</div>'
+    : '<div style="font-size:0.7rem;color:var(--text2);margin-bottom:0.75rem;padding:0.4rem 0.6rem;background:#FFF9E6;border-radius:6px;">⚠️ No Pay Planner saved for this week — showing setup budgets. Enter last week&#39;s pay in Pay Planner to see planned budgets.</div>';
 
   el.innerHTML =
-    // Header
     '<div class="card" style="background:var(--dark);color:#fff;margin-bottom:1rem;">' +
       '<div style="font-size:0.7rem;opacity:0.7;text-transform:uppercase;letter-spacing:0.08em;margin-bottom:0.25rem;">Last Week</div>' +
       '<div style="font-size:1rem;font-weight:800;">' + getWeekLabel(lastWk) + '</div>' +
-      '<div style="font-size:0.8rem;opacity:0.7;margin-top:0.15rem;">vs This week: ' + getWeekLabel(thisWk) + '</div>' +
+      '<div style="font-size:0.8rem;opacity:0.7;margin-top:0.15rem;">Current week: ' + getWeekLabel(thisWk) + '</div>' +
     '</div>' +
 
-    // Score card
     '<div style="background:#fff;border-radius:12px;padding:1.25rem;box-shadow:0 2px 12px rgba(0,0,0,0.08);margin-bottom:1rem;text-align:center;">' +
       '<div style="font-size:3rem;font-weight:900;color:' + scoreColor + ';line-height:1;">' + score + '</div>' +
       '<div style="font-size:1rem;font-weight:700;color:' + scoreColor + ';margin-top:0.25rem;">' + scoreEmoji + ' ' + scoreLabel + '</div>' +
@@ -2347,15 +2385,13 @@ function renderLastWeek() {
       '</div>' +
     '</div>' +
 
-    // KPI row
     '<div class="kpi-grid" style="margin-bottom:1rem;">' +
-      '<div class="kpi-card green"><div class="kpi-label">Income</div><div class="kpi-value">' + fmtK(lastIncome) + '</div><div class="kpi-sub">Last week</div></div>' +
+      '<div class="kpi-card green"><div class="kpi-label">Income</div><div class="kpi-value">' + fmtK(lastIncome) + '</div><div class="kpi-sub">' + (plannedTotal > 0 ? 'Planned: ' + fmt(plannedTotal) : 'Last week') + '</div></div>' +
       '<div class="kpi-card red"><div class="kpi-label">Spent</div><div class="kpi-value">' + fmtK(lastSpend) + '</div><div class="kpi-sub">' + lastTxs.filter(t=>t.debit>0).length + ' transactions</div></div>' +
-      '<div class="kpi-card ' + (lastSaved >= totalSavingsGoal ? 'green' : 'red') + '"><div class="kpi-label">Saved</div><div class="kpi-value">' + fmtK(lastSaved) + '</div><div class="kpi-sub">Goal: ' + fmt(totalSavingsGoal) + '</div></div>' +
+      '<div class="kpi-card ' + (metSavings ? 'green' : 'red') + '"><div class="kpi-label">Saved</div><div class="kpi-value">' + fmtK(lastSaved) + '</div><div class="kpi-sub">Planned: ' + fmt(plannedSavings) + '</div></div>' +
       '<div class="kpi-card ' + (lastNet >= 0 ? 'green' : 'red') + '"><div class="kpi-label">Net</div><div class="kpi-value" style="color:' + (lastNet>=0?'var(--green)':'var(--red)') + ';">' + (lastNet>=0?'+':'') + fmtK(lastNet) + '</div><div class="kpi-sub">Income minus spend</div></div>' +
     '</div>' +
 
-    // Insights
     '<div class="card" style="margin-bottom:1rem;">' +
       '<div class="card-title">What happened</div>' +
       insights.map(i =>
@@ -2366,21 +2402,21 @@ function renderLastWeek() {
       ).join('') +
     '</div>' +
 
-    // Category vs budget breakdown
     '<div class="card" style="margin-bottom:1rem;">' +
-      '<div class="card-title">Category Breakdown</div>' +
+      '<div class="card-title">Category Breakdown — Planned vs Actual</div>' +
+      plannerNote +
       (Object.keys(catTotals).length ?
         Object.entries(catTotals).sort((a,b) => b[1]-a[1]).map(([cat, amt]) => {
-          const ci = catInfo(cat);
-          const bud = s.budgets[cat] || 0;
+          const ci  = catInfo(cat);
+          const bud = getBudget(cat);
           const over = bud > 0 && amt > bud;
-          const pct = bud > 0 ? Math.min(100, amt/bud*100) : 50;
-          return '<div style="margin-bottom:0.85rem;">' +
+          const pct  = bud > 0 ? Math.min(100, amt/bud*100) : 50;
+          return '<div style="margin-bottom:0.9rem;">' +
             '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.25rem;">' +
               '<span style="font-size:0.85rem;font-weight:600;">' + ci.icon + ' ' + cat + '</span>' +
               '<div style="text-align:right;">' +
                 '<span style="font-size:0.85rem;font-weight:700;color:' + (over?'var(--red)':'var(--text)') + ';">' + fmt(amt) + '</span>' +
-                (bud>0 ? '<span style="font-size:0.7rem;color:var(--text2);"> / ' + fmt(bud) + '</span>' : '') +
+                (bud>0 ? '<span style="font-size:0.7rem;color:var(--text2);"> / ' + fmt(bud) + ' ' + (hasPlannerData?'planned':'budget') + '</span>' : '') +
               '</div>' +
             '</div>' +
             (bud>0 ?
@@ -2391,11 +2427,10 @@ function renderLastWeek() {
             ) +
           '</div>';
         }).join('') :
-        '<p style="font-size:0.875rem;color:var(--text2);">No spending recorded last week</p>'
+        '<p style="font-size:0.875rem;color:var(--text2);">No spending recorded for this week</p>'
       ) +
     '</div>' +
 
-    // This week action plan
     '<div class="card" style="background:var(--accent);color:#fff;">' +
       '<div style="font-size:0.75rem;opacity:0.8;text-transform:uppercase;letter-spacing:0.08em;margin-bottom:0.5rem;">🎯 Action Plan for This Week</div>' +
       actions.map((a, i) =>
