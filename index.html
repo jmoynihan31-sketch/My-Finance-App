@@ -1781,7 +1781,6 @@ function computeGoalSplit(totalPay) {
   });
   if (!activeGoals.length) return [];
   const s = state.settings;
-  // Rent is always half (weekly accrual), regardless of payment week
   const weeklyRent = Math.round(s.rent / 2 * 100) / 100;
   const savingsX = totalPay * s.savingsPct;
   const oneoff = parseFloat(document.getElementById('planner-oneoff').value) || 0;
@@ -1790,9 +1789,24 @@ function computeGoalSplit(totalPay) {
 
   const goalData = activeGoals.map(g => {
     const wks = weeksUntil(g.date) || 52;
-    const needed = Math.max(0, (g.target || 0) - (g.saved || 0));
-    const perWk = needed / wks;
-    return { g, wks, needed, perWk };
+    const target = g.target || 0;
+    const saved  = g.saved  || 0;
+
+    // Use a FIXED weekly rate — set once when the goal is first computed
+    // and stored on the goal so saving progress doesn't change the recommendation.
+    // Rate = target / totalWeeks (where totalWeeks was fixed at first calculation).
+    if (!g.weeklyTarget && target > 0 && wks > 0) {
+      // First time seen — lock in the weekly rate based on current deadline
+      g.weeklyTarget = Math.round((target / wks) * 100) / 100;
+      saveStateSync(); // persist to state
+    }
+    const perWk  = g.weeklyTarget || Math.round((target / Math.max(wks, 1)) * 100) / 100;
+    const needed = Math.max(0, target - saved); // still needed (for display only)
+    const totalWeeksNeeded = perWk > 0 ? Math.ceil(target / perWk) : wks;
+    const weeksElapsed     = Math.max(0, totalWeeksNeeded - wks);
+    const onTrack          = saved >= perWk * weeksElapsed;
+
+    return { g, wks, needed, perWk, onTrack, saved, target };
   });
 
   const exactTotal = goalData.reduce((a, d) => a + d.perWk, 0);
@@ -2119,21 +2133,23 @@ function updatePlanner() {
         const savedPct = Math.min(100, ((g.saved || 0) / g.target) * 100).toFixed(0);
         const urgColor = d.wks <= 4 ? 'var(--red)' : d.wks <= 12 ? 'var(--orange)' : 'var(--green)';
         const urgIcon  = d.wks <= 4 ? '🔥' : d.wks <= 12 ? '⚡' : '📅';
+        const trackIcon = d.onTrack ? '✅' : '⚠️';
+        const trackTxt  = d.onTrack ? 'On track' : 'Behind — catch up needed';
         return '<div style="display:flex;align-items:center;justify-content:space-between;' +
                'padding:0.45rem 0.6rem 0.45rem 1rem;border-left:2px solid ' + urgColor + ';' +
                'margin:0.3rem 0;background:#FAFAFA;border-radius:0 8px 8px 0;">' +
           '<div style="flex:1;min-width:0;">' +
             '<div style="font-size:0.8rem;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">' + urgIcon + ' ' + g.name + '</div>' +
             '<div style="font-size:0.68rem;color:var(--text2);margin-top:0.1rem;">' +
-              d.wks + ' wks · ' + savedPct + '% saved · ' + fmt(d.needed) + ' needed' +
+              d.wks + ' wks left · ' + savedPct + '% saved · ' + trackIcon + ' ' + trackTxt +
             '</div>' +
             '<div style="background:#e8e8e8;border-radius:20px;height:3px;margin-top:0.3rem;overflow:hidden;">' +
               '<div style="width:' + savedPct + '%;height:100%;background:' + urgColor + ';border-radius:20px;"></div>' +
             '</div>' +
           '</div>' +
           '<div style="text-align:right;margin-left:0.75rem;flex-shrink:0;">' +
-            '<div style="font-size:0.9rem;font-weight:800;color:' + urgColor + ';">' + fmt(d.allocated) + '</div>' +
-            '<div style="font-size:0.68rem;color:var(--text2);">' + gPct + '% of pay</div>' +
+            '<div style="font-size:0.9rem;font-weight:800;color:' + urgColor + ';">' + fmt(d.allocated) + '/wk</div>' +
+            '<div style="font-size:0.68rem;color:var(--text2);">fixed rate</div>' +
           '</div>' +
         '</div>';
       }).join('') : '<div style="font-size:0.75rem;color:var(--text2);padding:0.4rem 0.75rem;font-style:italic;">No active goals — add goals to see breakdown</div>';
@@ -2595,13 +2611,22 @@ function openGoalModal(id) {
 
 async function saveGoal() {
   const id = document.getElementById('goal-edit-id').value;
+  const existingGoal = id ? state.goals.find(x => x.id === id) : null;
+  const newTarget = parseFloat(document.getElementById('g-target').value)||0;
+  const newDate   = document.getElementById('g-date').value;
+  // Clear weeklyTarget if target amount or deadline changed, so rate recalculates
+  const targetOrDateChanged = existingGoal &&
+    (existingGoal.target !== newTarget || existingGoal.date !== newDate);
+
   const g = {
     id: id || uid(),
     name:   document.getElementById('g-name').value,
-    target: parseFloat(document.getElementById('g-target').value)||0,
+    target: newTarget,
     saved:  parseFloat(document.getElementById('g-saved').value)||0,
-    date:   document.getElementById('g-date').value,
+    date:   newDate,
     note:   document.getElementById('g-note').value,
+    // Preserve weeklyTarget unless target/date changed or new goal
+    weeklyTarget: (existingGoal && !targetOrDateChanged) ? existingGoal.weeklyTarget : undefined,
   };
   if (!g.name || !g.target) { showToast('Please enter a name and target'); return; }
   if (id) { const i = state.goals.findIndex(x => x.id === id); if(i>=0) state.goals[i] = g; }
