@@ -2129,7 +2129,8 @@ function updatePlanner() {
       const canFundAll = goalSplit.every(d => d.funded);
       const goalSubrows = activeGoalRows.length ? activeGoalRows.map(d => {
         const g = d.g;
-        const gPct = total > 0 ? (d.allocated / total * 100).toFixed(1) : '0.0';
+        const gPct      = total > 0       ? (d.allocated / total    * 100).toFixed(1) : '0.0';
+        const gSharePct = goalTotal > 0 ? (d.allocated / goalTotal * 100).toFixed(0) : '0';
         const savedPct = Math.min(100, ((g.saved || 0) / g.target) * 100).toFixed(0);
         const urgColor = d.wks <= 4 ? 'var(--red)' : d.wks <= 12 ? 'var(--orange)' : 'var(--green)';
         const urgIcon  = d.wks <= 4 ? '🔥' : d.wks <= 12 ? '⚡' : '📅';
@@ -2149,7 +2150,7 @@ function updatePlanner() {
           '</div>' +
           '<div style="text-align:right;margin-left:0.75rem;flex-shrink:0;">' +
             '<div style="font-size:0.9rem;font-weight:800;color:' + urgColor + ';">' + fmt(d.allocated) + '/wk</div>' +
-            '<div style="font-size:0.68rem;color:var(--text2);">fixed rate</div>' +
+            '<div style="font-size:0.68rem;color:var(--text2);">' + gPct + '% of pay · ' + gSharePct + '% of goals</div>' +
           '</div>' +
         '</div>';
       }).join('') : '<div style="font-size:0.75rem;color:var(--text2);padding:0.4rem 0.75rem;font-style:italic;">No active goals — add goals to see breakdown</div>';
