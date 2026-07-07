@@ -371,6 +371,7 @@ select.form-input { appearance: none; background-image: url("data:image/svg+xml,
       <button class="nav-tab" onclick="showPage('goals')">Goals</button>
       <button class="nav-tab" onclick="showPage('annual')">Annual</button>
       <button class="nav-tab" onclick="showPage('networth')">Net Worth</button>
+      <button class="nav-tab" onclick="showPage('raiz')">Raiz</button>
       <button class="nav-tab" onclick="showPage('subs')">Subscriptions</button>
       <button class="nav-tab" onclick="showPage('tax')">Tax Year</button>
       <button class="nav-tab" onclick="showPage('settings')">Settings</button>
@@ -390,6 +391,7 @@ select.form-input { appearance: none; background-image: url("data:image/svg+xml,
         <button onclick="navWeek(1)" style="background:none;border:none;font-size:1.3rem;cursor:pointer;padding:0.25rem 0.5rem;color:var(--accent);" id="dash-next-btn">›</button>
       </div>
     </div>
+    <div id="dash-balances"></div>
     <div id="dash-kpis"></div>
     <div id="dash-limit-alerts"></div>
     <div class="card">
@@ -659,7 +661,12 @@ select.form-input { appearance: none; background-image: url("data:image/svg+xml,
   </div>
 
   <!-- SUBSCRIPTIONS -->
-  <div class="page" id="page-subs">
+    <!-- RAIZ INVESTMENT TRACKER -->
+  <div class="page" id="page-raiz">
+    <div style="margin-top:1rem;" id="raiz-content"></div>
+  </div>
+
+<div class="page" id="page-subs">
     <div style="margin-top:1rem;">
       <div class="kpi-grid" style="margin-bottom:1rem;">
         <div class="kpi-card red">
@@ -817,6 +824,29 @@ select.form-input { appearance: none; background-image: url("data:image/svg+xml,
   </div>
 </div>
 
+<!-- Balance Modal -->
+<div class="modal-overlay" id="balance-modal">
+  <div class="modal">
+    <div class="modal-handle"></div>
+    <h2>Account Balance</h2>
+    <div style="font-size:0.78rem;color:var(--text2);margin-bottom:1rem;">Enter your balance as at the <strong>end</strong> of the chosen day. The app then tracks it forward using your imported transactions (including internal transfers).</div>
+    <div class="form-group"><label class="form-label">Account</label>
+      <select class="form-input" id="bal-account" onchange="onBalanceAccountChange()">
+        <option value="Debit Card">💳 Debit Card</option>
+        <option value="Savings Account">🏦 Savings Account</option>
+      </select>
+    </div>
+    <div class="form-row">
+      <div class="form-group"><label class="form-label">Balance ($)</label><input class="form-input" id="bal-amount" type="number" step="0.01" placeholder="0.00"></div>
+      <div class="form-group"><label class="form-label">As at end of</label><input class="form-input" id="bal-asof" type="date"></div>
+    </div>
+    <div class="form-actions">
+      <button class="btn btn-outline btn-full" onclick="closeModal('balance-modal')">Cancel</button>
+      <button class="btn btn-primary btn-full" onclick="saveBalance()">Save</button>
+    </div>
+  </div>
+</div>
+
 <!-- Split Transaction Modal -->
 <div class="modal-overlay" id="split-modal">
   <div class="modal">
@@ -955,7 +985,7 @@ const CATS = [
   {name:'Health & Medical',         icon:'❤️', color:'#E74C3C', bg:'#FDEDEC'},
   {name:'Entertainment & Subs',    icon:'🎬', color:'#6C3483', bg:'#EDE7F6'},
   {name:'Clothing & Personal',     icon:'👗', color:'#C0392B', bg:'#FDECEA'},
-  {name:'Savings Transfer',        icon:'🏦', color:'#27AE60', bg:'#EFE'},
+  {name:'External Savings Transfer', icon:'🏦', color:'#27AE60', bg:'#EFE'},
   {name:'Income',                  icon:'💵', color:'#27AE60', bg:'#EFE'},
   {name:'Miscellaneous',           icon:'📦', color:'#7F8C8D', bg:'#F5F5F5'},
   {name:'Internal Transfer',        icon:'🔄', color:'#BDC3C7', bg:'#F5F5F5'},
@@ -973,9 +1003,9 @@ const CAT_KEYWORDS = {
   'Health & Medical':        ['pharmacy','chemist','priceline','terry white','amcal','doctor','gp','medicare','dental','physio','optical','eyecare','hospital'],
   'Entertainment & Subs':   ['netflix','spotify','disney','stan','apple','google','youtube','amazon prime','twitch','binge','foxtel','gaming','steam','hbo','paramount'],
   'Clothing & Personal':    ['kmart','target','big w','myer','david jones','cotton on','uniqlo','h&m','bonds','city beach','beauty','haircut','barber','salon','nail'],
-  'Savings Transfer':        ['savings','transfer to','move to'],
+  'External Savings Transfer': ['raiz','vanguard','spaceship','commsec pocket','stockspot','microinvest'],
   'Income':                  ['salary','payroll','employer','wage','pay credit'],
-  'Internal Transfer':       ['transfer to savings','transfer from savings','tfr savings','savings to debit','debit to savings','own transfer','internal'],
+  'Internal Transfer':       ['transfer to savings','transfer from savings','tfr savings','savings to debit','debit to savings','transfer to debit','transfer from debit','tfr debit','own transfer','internal'],
   'Gamba':                   ['sportsbet','pointsbet','tab ','tabcorp','neds','ladbrokes','betfair','draftstars','palmerbet','betr','bluebet','bbet','topbetta','unibet','bet365','william hill','betdeluxe','betstar','luxbet','gambling','casino','pokies','crown casino','star casino','treasury casino','lotto','tatts','keno','powerball','oz lotto','lottery'],
 };
 
@@ -1057,18 +1087,37 @@ async function loadState(key) {
   if (!raw) {
     const sess = sessionStorage.getItem('finapp_session');
     if (sess) { try { state = JSON.parse(sess); } catch(e) {} }
+    migrateState();
     return true;
   }
   try {
     const payload = JSON.parse(raw);
     state = await decryptData(payload, key);
+    migrateState();
     sessionStorage.setItem('finapp_session', JSON.stringify(state));
     return true;
   } catch(e) {
     const sess = sessionStorage.getItem('finapp_session');
-    if (sess) { try { state = JSON.parse(sess); return true; } catch(e2) {} }
+    if (sess) { try { state = JSON.parse(sess); migrateState(); return true; } catch(e2) {} }
     return false;
   }
+}
+
+function migrateState() {
+  // v6 → v7: Savings Transfer renamed to External Savings Transfer
+  if (state.transactions) {
+    state.transactions.forEach(t => {
+      if (t.category === 'Savings Transfer') t.category = 'External Savings Transfer';
+    });
+  }
+  if (state.learnedRules) {
+    Object.keys(state.learnedRules).forEach(k => {
+      if (state.learnedRules[k] === 'Savings Transfer') state.learnedRules[k] = 'External Savings Transfer';
+    });
+  }
+  if (!state.accountBalances) state.accountBalances = {};
+  if (!state.raiz) state.raiz = { startBalance: null, startDate: null, weeklyRates: {} };
+  if (!state.accountMap) state.accountMap = {};
 }
 
 // ════════════════════════════════════════════════════════════
@@ -1222,7 +1271,7 @@ function showPage(id) {
   document.querySelectorAll('.nav-tab').forEach(t => t.classList.remove('active'));
   document.getElementById('page-' + id).classList.add('active');
   const tabs = document.querySelectorAll('.nav-tab');
-  const pages = ['dashboard','lastweek','monthly','transactions','payday','goals','annual','networth','subs','tax','settings'];
+  const pages = ['dashboard','lastweek','monthly','transactions','payday','goals','annual','networth','raiz','subs','tax','settings'];
   tabs[pages.indexOf(id)].classList.add('active');
   if (id === 'payday') renderPayday();
   if (id === 'goals') renderGoals();
@@ -1233,8 +1282,10 @@ function showPage(id) {
   if (id === 'lastweek') renderLastWeek();
   if (id === 'monthly') renderMonthly();
   if (id === 'tax') renderTaxYear();
+  if (id === 'raiz') renderRaiz();
   if (id === 'monthly') renderMonthly();
   if (id === 'tax') renderTaxYear();
+  if (id === 'raiz') renderRaiz();
   if (id === 'annual') renderAnnual();
 }
 
@@ -1265,7 +1316,9 @@ function isInternalTransfer(t) {
 // Transactions to exclude from SPEND calculations
 // (internal transfers + income credits should not count as spend)
 function isRealSpend(t) {
-  return t.debit > 0 && !isInternalTransfer(t);
+  // Consumption spending only — excludes internal transfers AND external savings
+  // (moving money to your own savings/investments is not spending)
+  return t.debit > 0 && !isInternalTransfer(t) && t.category !== 'External Savings Transfer';
 }
 // Real income = credits that are not internal transfers
 function isRealIncome(t) {
@@ -1273,7 +1326,7 @@ function isRealIncome(t) {
 }
 // Real savings = Savings Transfer debits that are not internal
 function isRealSaving(t) {
-  return t.category === 'Savings Transfer' && t.debit > 0 && !isInternalTransfer(t);
+  return t.category === 'External Savings Transfer' && t.debit > 0 && !isInternalTransfer(t);
 }
 
 function autoCategory(desc) {
@@ -1379,6 +1432,11 @@ function processCSVFile(file) {
   reader.onload = e => {
     const text = e.target.result;
     pendingImport = parseBendigoCSV(text);
+    // Auto-detect account: if we've seen this account number before, pre-select it
+    const nums = [...new Set(pendingImport.map(t => t.acctNum).filter(Boolean))];
+    if (nums.length === 1 && state.accountMap && state.accountMap[nums[0]]) {
+      document.getElementById('import-account-type').value = state.accountMap[nums[0]];
+    }
     const accountType = document.getElementById('import-account-type').value;
     const preview = document.getElementById('import-preview');
     const previewWrap = document.getElementById('import-preview-wrap');
@@ -1481,7 +1539,10 @@ function parseBendigoCSV(text) {
     if (debit === 0 && credit === 0) continue;
 
     const category = autoCategory(desc);
-    results.push({ id: uid(), date, description: desc, debit, credit, category, account: 'Debit Card', notes: '' });
+    // Capture Bendigo reference (col6) and account number (col0) for dedup + account detection
+    const ref = (isBendigoFormat && cols[6]) ? cols[6].trim() : '';
+    const acctNum = (isBendigoFormat && cols[0]) ? cols[0].trim() : '';
+    results.push({ id: uid(), date, description: desc, debit, credit, category, account: 'Debit Card', notes: '', ref, acctNum });
   }
   return results;
 }
@@ -1517,7 +1578,14 @@ function confirmImport() {
   let added = 0;
   pendingImport.forEach(t => {
     t.account = accountType;
-    const dup = state.transactions.find(e => e.date === t.date && e.description === t.description && e.debit === t.debit && e.credit === t.credit);
+    // Dedup: if both sides have a bank reference, that is the authoritative match.
+    // Otherwise fall back to date+description+amount (may merge genuine same-day
+    // duplicates, so the reference path is preferred when available).
+    const dup = state.transactions.find(e => {
+      if (e.account !== t.account) return false;
+      if (t.ref && e.ref) return e.ref === t.ref && e.date === t.date && e.debit === t.debit && e.credit === t.credit;
+      return e.date === t.date && e.description === t.description && e.debit === t.debit && e.credit === t.credit;
+    });
     if (!dup) {
       // Re-run autoCategory so learned rules apply to new imports
       t.category = autoCategory(t.description);
@@ -1525,7 +1593,14 @@ function confirmImport() {
       added++;
     }
   });
-  state.transactions.sort((a,b) => b.date.localeCompare(a.date));
+  // Remember account number → account type for future auto-detection
+  const nums = [...new Set(pendingImport.map(t => t.acctNum).filter(Boolean))];
+  if (nums.length === 1) {
+    if (!state.accountMap) state.accountMap = {};
+    state.accountMap[nums[0]] = accountType;
+  }
+  // Stable sort: newest date first, then description for consistent same-day ordering
+  state.transactions.sort((a,b) => b.date.localeCompare(a.date) || a.description.localeCompare(b.description));
   // Jump dashboard to the most recent imported week
   if (added > 0) {
     currentDashWeek = getWeekKey(state.transactions[0].date);
@@ -1535,6 +1610,47 @@ function confirmImport() {
   pendingImport = [];
   renderAll();
   showToast(`Imported ${added} transactions — categories auto-applied`);
+}
+
+// ════════════════════════════════════════════════════════════
+// ACCOUNT BALANCES
+// ════════════════════════════════════════════════════════════
+function computeAccountBalance(account) {
+  // Balance = user-entered starting balance (as at END of asOf date)
+  //         + all credits − all debits for that account dated AFTER asOf.
+  // Internal transfers ARE included — they move real money between accounts.
+  const ab = (state.accountBalances || {})[account];
+  if (!ab || ab.amount === undefined || ab.amount === null) return null;
+  const flow = state.transactions
+    .filter(t => t.account === account && t.date > ab.asOf)
+    .reduce((a,t) => a + t.credit - t.debit, 0);
+  return Math.round((ab.amount + flow) * 100) / 100;
+}
+
+function openBalanceModal() {
+  const accSel = document.getElementById('bal-account').value;
+  const ab = (state.accountBalances || {})[accSel];
+  document.getElementById('bal-amount').value = ab ? ab.amount : '';
+  document.getElementById('bal-asof').value = ab ? ab.asOf : brisbaneToday();
+  openModal('balance-modal');
+}
+function onBalanceAccountChange() {
+  const accSel = document.getElementById('bal-account').value;
+  const ab = (state.accountBalances || {})[accSel];
+  document.getElementById('bal-amount').value = ab ? ab.amount : '';
+  document.getElementById('bal-asof').value = ab ? ab.asOf : brisbaneToday();
+}
+function saveBalance() {
+  const acc  = document.getElementById('bal-account').value;
+  const amt  = parseFloat(document.getElementById('bal-amount').value);
+  const asOf = document.getElementById('bal-asof').value;
+  if (isNaN(amt) || !asOf) { showToast('Please enter a balance and date'); return; }
+  if (!state.accountBalances) state.accountBalances = {};
+  state.accountBalances[acc] = { amount: amt, asOf };
+  saveStateSync();
+  closeModal('balance-modal');
+  renderDashboard();
+  showToast(acc + ' balance saved');
 }
 
 // ════════════════════════════════════════════════════════════
@@ -1581,6 +1697,42 @@ function renderDashboard() {
   document.getElementById('dash-next-btn').style.opacity = isNewest ? '0.3' : '1';
   document.getElementById('dash-next-btn').style.pointerEvents = isNewest ? 'none' : 'auto';
 
+  // ── Account balances (from starting balance + all transaction flow) ──
+  const balEl = document.getElementById('dash-balances');
+  if (balEl) {
+    const accounts = ['Debit Card', 'Savings Account'];
+    const balances = accounts.map(acc => ({ acc, bal: computeAccountBalance(acc) }));
+    const anySet = balances.some(b => b.bal !== null);
+    if (anySet) {
+      const combined = balances.reduce((a,b) => a + (b.bal||0), 0);
+      balEl.innerHTML =
+        '<div class="card" style="margin-bottom:1rem;padding:1rem;">' +
+          '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.6rem;">' +
+            '<div style="font-size:0.75rem;font-weight:700;color:var(--text2);text-transform:uppercase;letter-spacing:0.06em;">💰 Account Balances</div>' +
+            '<span style="font-size:0.7rem;color:var(--accent);cursor:pointer;font-weight:700;" onclick="openBalanceModal()">Update</span>' +
+          '</div>' +
+          '<div style="display:flex;gap:0.75rem;">' +
+            balances.map(b =>
+              '<div style="flex:1;background:#FAFAFA;border-radius:10px;padding:0.6rem 0.75rem;">' +
+                '<div style="font-size:0.68rem;color:var(--text2);">' + (b.acc === 'Debit Card' ? '💳 Debit' : '🏦 Savings') + '</div>' +
+                '<div style="font-size:1.05rem;font-weight:800;color:' + ((b.bal||0) >= 0 ? 'var(--text)' : 'var(--red)') + ';">' + (b.bal !== null ? fmt(b.bal) : '—') + '</div>' +
+              '</div>'
+            ).join('') +
+            '<div style="flex:1;background:var(--dark);border-radius:10px;padding:0.6rem 0.75rem;">' +
+              '<div style="font-size:0.68rem;color:rgba(255,255,255,0.6);">Total</div>' +
+              '<div style="font-size:1.05rem;font-weight:800;color:#fff;">' + fmt(combined) + '</div>' +
+            '</div>' +
+          '</div>' +
+        '</div>';
+    } else {
+      balEl.innerHTML =
+        '<div class="card" style="margin-bottom:1rem;padding:0.85rem 1rem;display:flex;justify-content:space-between;align-items:center;">' +
+          '<div style="font-size:0.8rem;color:var(--text2);">💰 Set your account balances to track them here</div>' +
+          '<span style="font-size:0.75rem;color:var(--accent);cursor:pointer;font-weight:700;" onclick="openBalanceModal()">Set up →</span>' +
+        '</div>';
+    }
+  }
+
   // Filter transactions for selected week
   const txs = state.transactions.filter(t => getWeekKey(t.date) === wk);
   const totalSpend  = txs.filter(isRealSpend).reduce((a,t) => a + t.debit, 0);
@@ -1609,7 +1761,7 @@ function renderDashboard() {
       <div class="kpi-card orange">
         <div class="kpi-label">Saved</div>
         <div class="kpi-value">${fmtK(totalSaved)}</div>
-        <div class="kpi-sub">Transfers out</div>
+        <div class="kpi-sub">External savings</div>
       </div>
     </div>`;
 
@@ -1854,7 +2006,7 @@ function miniGoal(g) {
 function detectRecurring() {
   // Find merchants appearing in 3+ different week keys
   // Exclude known fixed/transfer categories — only show unexpected recurring spend
-  const skipCats = new Set(['Savings Transfer','Rent','Internal Transfer','Income']);
+  const skipCats = new Set(['External Savings Transfer','Rent','Internal Transfer','Income']);
   const txs = state.transactions.filter(t => t.debit > 0 && !isInternalTransfer(t) && !skipCats.has(t.category));
   const merchantWeeks = {};
   txs.forEach(t => {
@@ -2657,7 +2809,7 @@ function renderPlannerVsActual(wk, rows, amounts) {
     'Transport & Fuel':        amounts.transport || 0,
     'Utilities & Bills':       amounts.bills     || 0,
     'Miscellaneous':           amounts.misc      || 0,
-    'Savings Transfer':        amounts.savings   || 0,
+    'External Savings Transfer': amounts.savings   || 0,
     'Entertainment & Subs':    0,
     'Health & Medical':        0,
     'Clothing & Personal':     0,
@@ -2813,7 +2965,7 @@ function renderLastWeek() {
     'Transport & Fuel':        'transport',
     'Utilities & Bills':       'bills',
     'Miscellaneous':           'misc',
-    'Savings Transfer':        'savings',
+    'External Savings Transfer': 'savings',
     'Entertainment & Subs':    null,
     'Health & Medical':        null,
     'Clothing & Personal':     null,
@@ -3250,6 +3402,151 @@ function renderTaxYear() {
         'HECS repayments, and your tax return. The ATO deadline is 31 October ' + (tm>=7?ty+1:ty) + '.' +
       '</div>' +
     '</div>';
+}
+
+// ════════════════════════════════════════════════════════════
+// RAIZ INVESTMENT TRACKER
+// ════════════════════════════════════════════════════════════
+function getRaizTransfersForWeek(wk) {
+  // Money into Raiz = External Savings Transfer debits mentioning raiz
+  return state.transactions
+    .filter(t => t.category === 'External Savings Transfer' && t.debit > 0 &&
+                 t.description.toLowerCase().includes('raiz') &&
+                 getWeekKey(t.date) === wk)
+    .reduce((a,t) => a + t.debit, 0);
+}
+function raizWeekKeysSinceStart() {
+  const r = state.raiz || {};
+  if (!r.startDate) return [];
+  const startWk = getWeekKey(r.startDate);
+  const nowWk = currentWeekKey();
+  const keys = [];
+  let [y,m,d] = startWk.split('-').map(Number);
+  let cur = Date.UTC(y, m-1, d);
+  const [ny,nm,nd] = nowWk.split('-').map(Number);
+  const end = Date.UTC(ny, nm-1, nd);
+  while (cur <= end && keys.length < 260) {
+    const dt = new Date(cur);
+    keys.push(dt.getUTCFullYear() + '-' + String(dt.getUTCMonth()+1).padStart(2,'0') + '-' + String(dt.getUTCDate()).padStart(2,'0'));
+    cur += 7 * 86400000;
+  }
+  return keys;
+}
+function computeRaizProgression() {
+  // Week by week: balance = prev * (1 + rate%) + transfers that week
+  const r = state.raiz || {};
+  if (r.startBalance === null || r.startBalance === undefined || !r.startDate) return null;
+  const weeks = raizWeekKeysSinceStart();
+  let bal = r.startBalance;
+  let totalContrib = 0, totalGrowth = 0;
+  const rows = weeks.map(wk => {
+    const rate = (r.weeklyRates || {})[wk];
+    const growth = rate !== undefined ? Math.round(bal * (rate/100) * 100) / 100 : 0;
+    const contrib = getRaizTransfersForWeek(wk);
+    bal = Math.round((bal + growth + contrib) * 100) / 100;
+    totalContrib += contrib;
+    totalGrowth  += growth;
+    return { wk, rate, growth, contrib, bal };
+  });
+  return { rows, balance: bal, totalContrib: Math.round(totalContrib*100)/100, totalGrowth: Math.round(totalGrowth*100)/100 };
+}
+
+function renderRaiz() {
+  const el = document.getElementById('raiz-content');
+  const r = state.raiz || {};
+
+  // Setup state — no starting balance yet
+  if (r.startBalance === null || r.startBalance === undefined || !r.startDate) {
+    el.innerHTML =
+      '<div class="card" style="background:var(--dark);color:#fff;margin-bottom:1rem;">' +
+        '<div style="font-size:0.75rem;opacity:0.7;text-transform:uppercase;letter-spacing:0.08em;margin-bottom:0.25rem;">Raiz Tracker</div>' +
+        '<div style="font-size:1.3rem;font-weight:800;">Investment Portfolio</div>' +
+        '<div style="font-size:0.8rem;opacity:0.7;margin-top:0.2rem;">Track your Raiz balance with weekly growth rates — no statements needed</div>' +
+      '</div>' +
+      '<div class="card">' +
+        '<div class="card-title">Set your starting balance</div>' +
+        '<div style="font-size:0.8rem;color:var(--text2);margin-bottom:1rem;">Enter your current Raiz balance once. From then on, the app updates it automatically using your weekly growth % and any transfers labelled &#39;raiz&#39; in your transactions.</div>' +
+        '<div class="form-row">' +
+          '<div class="form-group"><label class="form-label">Current Balance ($)</label><input class="form-input" id="raiz-start-bal" type="number" step="0.01" placeholder="1500.00"></div>' +
+          '<div class="form-group"><label class="form-label">As at</label><input class="form-input" id="raiz-start-date" type="date" value="' + brisbaneToday() + '"></div>' +
+        '</div>' +
+        '<button class="btn btn-primary btn-full" onclick="startRaiz()">Start Tracking</button>' +
+      '</div>';
+    return;
+  }
+
+  const prog = computeRaizProgression();
+  const nowWk = currentWeekKey();
+  const currentRate = (r.weeklyRates || {})[nowWk];
+  const gainPct = r.startBalance > 0 ? ((prog.balance - r.startBalance - prog.totalContrib) / r.startBalance * 100).toFixed(1) : '0.0';
+
+  el.innerHTML =
+    '<div class="card" style="background:var(--dark);color:#fff;margin-bottom:1rem;">' +
+      '<div style="display:flex;justify-content:space-between;align-items:flex-start;">' +
+        '<div>' +
+          '<div style="font-size:0.75rem;opacity:0.7;text-transform:uppercase;letter-spacing:0.08em;margin-bottom:0.25rem;">Raiz Balance</div>' +
+          '<div style="font-size:2rem;font-weight:900;">' + fmt(prog.balance) + '</div>' +
+          '<div style="font-size:0.75rem;opacity:0.7;margin-top:0.2rem;">Started ' + r.startDate + ' at ' + fmt(r.startBalance) + '</div>' +
+        '</div>' +
+        '<span style="font-size:0.7rem;color:rgba(255,255,255,0.7);cursor:pointer;border:1px solid rgba(255,255,255,0.3);border-radius:6px;padding:0.2rem 0.5rem;" onclick="resetRaiz()">Reset</span>' +
+      '</div>' +
+    '</div>' +
+
+    '<div class="kpi-grid" style="margin-bottom:1rem;">' +
+      '<div class="kpi-card green"><div class="kpi-label">Contributed</div><div class="kpi-value">' + fmtK(prog.totalContrib) + '</div><div class="kpi-sub">Raiz transfers</div></div>' +
+      '<div class="kpi-card ' + (prog.totalGrowth >= 0 ? 'green' : 'red') + '"><div class="kpi-label">Market Growth</div><div class="kpi-value" style="color:' + (prog.totalGrowth>=0?'var(--green)':'var(--red)') + ';">' + (prog.totalGrowth>=0?'+':'') + fmtK(prog.totalGrowth) + '</div><div class="kpi-sub">' + gainPct + '% on start</div></div>' +
+    '</div>' +
+
+    '<div class="card" style="margin-bottom:1rem;">' +
+      '<div class="card-title">This Week&#39;s Growth Rate</div>' +
+      '<div style="font-size:0.78rem;color:var(--text2);margin-bottom:0.75rem;">Enter the % your portfolio moved this week (from the Raiz app). Negative values are fine for down weeks.</div>' +
+      '<div style="display:flex;gap:0.5rem;align-items:center;">' +
+        '<input class="form-input" id="raiz-week-rate" type="number" step="0.01" placeholder="e.g. 0.45" value="' + (currentRate !== undefined ? currentRate : '') + '" style="flex:1;">' +
+        '<span style="font-weight:700;color:var(--text2);">%</span>' +
+        '<button class="btn btn-primary btn-sm" onclick="saveRaizRate()">Save</button>' +
+      '</div>' +
+      '<div style="font-size:0.7rem;color:var(--text2);margin-top:0.5rem;">Week: ' + getWeekLabel(nowWk) + (currentRate !== undefined ? ' · saved ✅' : ' · not yet entered') + '</div>' +
+    '</div>' +
+
+    '<div class="card">' +
+      '<div class="card-title">Weekly History</div>' +
+      (prog.rows.length ?
+        prog.rows.slice().reverse().slice(0, 16).map(row =>
+          '<div style="display:flex;justify-content:space-between;align-items:center;padding:0.5rem 0;border-bottom:1px solid #f5f5f5;">' +
+            '<div>' +
+              '<div style="font-size:0.8rem;font-weight:700;">' + getWeekLabel(row.wk) + '</div>' +
+              '<div style="font-size:0.68rem;color:var(--text2);">' +
+                (row.rate !== undefined ? (row.rate>=0?'+':'') + row.rate + '% (' + (row.growth>=0?'+':'') + fmt(row.growth) + ')' : 'no rate entered') +
+                (row.contrib > 0 ? ' · +' + fmt(row.contrib) + ' in' : '') +
+              '</div>' +
+            '</div>' +
+            '<div style="font-weight:800;font-size:0.9rem;">' + fmt(row.bal) + '</div>' +
+          '</div>'
+        ).join('') :
+        '<p style="font-size:0.8rem;color:var(--text2);">History builds week by week</p>') +
+    '</div>';
+}
+
+function startRaiz() {
+  const bal = parseFloat(document.getElementById('raiz-start-bal').value);
+  const date = document.getElementById('raiz-start-date').value;
+  if (isNaN(bal) || !date) { showToast('Please enter a balance and date'); return; }
+  state.raiz = { startBalance: bal, startDate: date, weeklyRates: {} };
+  saveStateSync(); renderRaiz();
+  showToast('Raiz tracking started');
+}
+function saveRaizRate() {
+  const rate = parseFloat(document.getElementById('raiz-week-rate').value);
+  if (isNaN(rate)) { showToast('Please enter a rate (e.g. 0.45 or -0.3)'); return; }
+  if (!state.raiz.weeklyRates) state.raiz.weeklyRates = {};
+  state.raiz.weeklyRates[currentWeekKey()] = rate;
+  saveStateSync(); renderRaiz();
+  showToast('Rate saved for this week');
+}
+function resetRaiz() {
+  if (!confirm('Reset Raiz tracking? Your weekly rates will be cleared.')) return;
+  state.raiz = { startBalance: null, startDate: null, weeklyRates: {} };
+  saveStateSync(); renderRaiz();
 }
 
 // ════════════════════════════════════════════════════════════
