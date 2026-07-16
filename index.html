@@ -392,6 +392,7 @@ select.form-input { appearance: none; background-image: url("data:image/svg+xml,
       </div>
     </div>
     <div id="dash-balances"></div>
+    <div id="dash-savings-alloc"></div>
     <div id="dash-kpis"></div>
     <div id="dash-limit-alerts"></div>
     <div class="card">
@@ -761,7 +762,8 @@ select.form-input { appearance: none; background-image: url("data:image/svg+xml,
     <div class="form-group"><label class="form-label">Goal Name</label><input class="form-input" id="g-name" placeholder="e.g. Car Registration"></div>
     <div class="form-row">
       <div class="form-group"><label class="form-label">Target ($)</label><input class="form-input" id="g-target" type="number" placeholder="3000"></div>
-      <div class="form-group"><label class="form-label">Starting Amount ($) — manual only</label><input class="form-input" id="g-saved" type="number" placeholder="0"><div style="font-size:0.68rem;color:var(--text2);margin-top:0.25rem;">Weekly planner allocations are added on top automatically — don&#39;t re-enter them here.</div></div>
+      <input type="hidden" id="g-saved" value="0">
+      <div style="font-size:0.72rem;color:var(--text2);background:#F4F8F4;border-radius:8px;padding:0.6rem 0.75rem;margin-bottom:0.5rem;">🔗 Progress is tracked automatically from your Savings Account balance — no need to enter what you&#39;ve saved. Just set the target and deadline.</div>
     </div>
     <div class="form-group"><label class="form-label">Target Date</label><input class="form-input" id="g-date" type="date"></div>
     <div class="form-group"><label class="form-label">Category / Notes</label><input class="form-input" id="g-note" placeholder="Optional notes"></div>
@@ -851,7 +853,7 @@ select.form-input { appearance: none; background-image: url("data:image/svg+xml,
   <div class="modal">
     <div class="modal-handle"></div>
     <h2>Account Balance</h2>
-    <div style="font-size:0.78rem;color:var(--text2);margin-bottom:1rem;">Enter your balance as at the <strong>end</strong> of the chosen day. The app then tracks it forward using your imported transactions (including internal transfers).</div>
+    <div style="font-size:0.78rem;color:var(--text2);margin-bottom:1rem;">Enter each balance as at the <strong>end</strong> of the chosen day — you only do this once. The app tracks it forward from your transactions, and your Savings balance automatically funds your bills reserve and goals.</div>
     <div class="form-group"><label class="form-label">Account</label>
       <select class="form-input" id="bal-account" onchange="onBalanceAccountChange()">
         <option value="Debit Card">💳 Debit Card</option>
@@ -1100,6 +1102,7 @@ async function saveState() {
   }
 }
 function saveStateSync() {
+  invalidateSavingsAlloc();
   if (!encryptionKey) return;
   sessionStorage.setItem('finapp_session', JSON.stringify(state));
   saveState();
@@ -1289,6 +1292,7 @@ function addDefaultSubs() {
 // NAVIGATION
 // ════════════════════════════════════════════════════════════
 function showPage(id) {
+  invalidateSavingsAlloc();
   document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
   document.querySelectorAll('.nav-tab').forEach(t => t.classList.remove('active'));
   document.getElementById('page-' + id).classList.add('active');
@@ -1641,11 +1645,25 @@ function confirmImport() {
   if (added > 0) {
     currentDashWeek = getWeekKey(state.transactions[0].date);
   }
+  invalidateSavingsAlloc();
   saveStateSync();
   closeModal('import-modal');
   pendingImport = [];
   renderAll();
-  showToast(`Imported ${added} transactions — categories auto-applied`);
+  showToast(`Imported ${added} transactions — everything synced`);
+  // First time we see this account with no balance anchor, gently prompt once
+  // so the whole balance → savings → goals chain can activate.
+  if (added > 0 && !isBalanceAnchored(accountType) && !state._balancePromptShown) {
+    state._balancePromptShown = true;
+    saveStateSync();
+    setTimeout(() => {
+      if (confirm('Set your current ' + accountType + ' balance now?\n\nThis is the only number you need to enter manually — after that, balances, savings and goals all update automatically from your transactions.')) {
+        document.getElementById('bal-account').value = accountType;
+        onBalanceAccountChange();
+        openModal('balance-modal');
+      }
+    }, 600);
+  }
 }
 
 // ════════════════════════════════════════════════════════════
@@ -1661,6 +1679,13 @@ function computeAccountBalance(account) {
     .filter(t => t.account === account && t.date > ab.asOf)
     .reduce((a,t) => a + t.credit - t.debit, 0);
   return Math.round((ab.amount + flow) * 100) / 100;
+}
+function hasAnyTxForAccount(account) {
+  return state.transactions.some(t => t.account === account);
+}
+function isBalanceAnchored(account) {
+  const ab = (state.accountBalances || {})[account];
+  return !!(ab && ab.amount !== undefined && ab.amount !== null);
 }
 
 function openBalanceModal() {
@@ -1683,16 +1708,18 @@ function saveBalance() {
   if (isNaN(amt) || !asOf) { showToast('Please enter a balance and date'); return; }
   if (!state.accountBalances) state.accountBalances = {};
   state.accountBalances[acc] = { amount: amt, asOf };
+  invalidateSavingsAlloc();
   saveStateSync();
   closeModal('balance-modal');
-  renderDashboard();
-  showToast(acc + ' balance saved');
+  renderAll();
+  showToast(acc + ' balance set — goals now funded automatically');
 }
 
 // ════════════════════════════════════════════════════════════
 // RENDER ALL
 // ════════════════════════════════════════════════════════════
 function renderAll() {
+  invalidateSavingsAlloc();
   const n = state.settings.name;
   document.getElementById('greeting').textContent = n ? `Hi, ${n}` : 'My Finance';
   renderDashboard();
@@ -1744,13 +1771,13 @@ function renderDashboard() {
       balEl.innerHTML =
         '<div class="card" style="margin-bottom:1rem;padding:1rem;">' +
           '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.6rem;">' +
-            '<div style="font-size:0.75rem;font-weight:700;color:var(--text2);text-transform:uppercase;letter-spacing:0.06em;">💰 Account Balances</div>' +
+            '<div style="font-size:0.75rem;font-weight:700;color:var(--text2);text-transform:uppercase;letter-spacing:0.06em;">💰 Account Balances <span style="text-transform:none;letter-spacing:0;color:var(--green);font-weight:600;">· live</span></div>' +
             '<span style="font-size:0.7rem;color:var(--accent);cursor:pointer;font-weight:700;" onclick="openBalanceModal()">Update</span>' +
           '</div>' +
           '<div style="display:flex;gap:0.75rem;">' +
             balances.map(b =>
               '<div style="flex:1;background:#FAFAFA;border-radius:10px;padding:0.6rem 0.75rem;">' +
-                '<div style="font-size:0.68rem;color:var(--text2);">' + (b.acc === 'Debit Card' ? '💳 Debit' : '🏦 Savings') + '</div>' +
+                '<div style="font-size:0.68rem;color:var(--text2);">' + (b.acc === 'Debit Card' ? '💳 Debit' : '🏦 Savings') + (isBalanceAnchored(b.acc) ? '' : (hasAnyTxForAccount(b.acc) ? ' <span style="color:var(--orange);">⚠</span>' : '')) + '</div>' +
                 '<div style="font-size:1.05rem;font-weight:800;color:' + ((b.bal||0) >= 0 ? 'var(--text)' : 'var(--red)') + ';">' + (b.bal !== null ? fmt(b.bal) : '—') + '</div>' +
               '</div>'
             ).join('') +
@@ -1759,13 +1786,51 @@ function renderDashboard() {
               '<div style="font-size:1.05rem;font-weight:800;color:#fff;">' + fmt(combined) + '</div>' +
             '</div>' +
           '</div>' +
+          (state.transactions.length ? '<div style="font-size:0.66rem;color:var(--text2);margin-top:0.55rem;text-align:center;">Updates automatically from your transactions · last: ' + state.transactions[0].date + '</div>' : '') +
         '</div>';
     } else {
+      const hasTx = state.transactions.length > 0;
       balEl.innerHTML =
-        '<div class="card" style="margin-bottom:1rem;padding:0.85rem 1rem;display:flex;justify-content:space-between;align-items:center;">' +
-          '<div style="font-size:0.8rem;color:var(--text2);">💰 Set your account balances to track them here</div>' +
-          '<span style="font-size:0.75rem;color:var(--accent);cursor:pointer;font-weight:700;" onclick="openBalanceModal()">Set up →</span>' +
+        '<div class="card" style="margin-bottom:1rem;padding:1rem;">' +
+          '<div style="font-size:0.85rem;font-weight:700;margin-bottom:0.35rem;">💰 Turn on automatic tracking</div>' +
+          '<div style="font-size:0.76rem;color:var(--text2);line-height:1.5;margin-bottom:0.75rem;">Enter your current balance once. After that, your balances, savings allocation and goal progress all update themselves every time you import transactions — no manual entry.</div>' +
+          '<button class="btn btn-primary btn-sm btn-full" onclick="openBalanceModal()">' + (hasTx ? 'Set my balance →' : 'Set up →') + '</button>' +
         '</div>';
+    }
+  }
+
+  // ── Savings allocation (auto-fund goals from real savings balance) ──
+  const saEl = document.getElementById('dash-savings-alloc');
+  if (saEl) {
+    const alloc = savingsAllocation();
+    if (!alloc.hasBalance || (alloc.annual.length === 0 && Object.keys(alloc.goalAlloc).length === 0)) {
+      saEl.innerHTML = '';
+    } else {
+      const bal = alloc.savingsBal;
+      const rows = [];
+      if (alloc.annualReserved > 0 || alloc.annualNeeded > 0)
+        rows.push({ icon:'🔒', label:'Reserved for bills', val:alloc.annualReserved, color:'var(--orange)',
+                    sub: alloc.annualReserved < alloc.annualNeeded ? fmt(alloc.annualNeeded - alloc.annualReserved) + ' short' : 'on track' });
+      if (alloc.goalsReserved > 0 || Object.keys(alloc.goalAlloc).length)
+        rows.push({ icon:'🎯', label:'Backing goals', val:alloc.goalsReserved, color:'var(--green)', sub:'' });
+      rows.push({ icon:'💰', label:'Free buffer', val:alloc.buffer, color:'var(--text2)', sub:'unallocated' });
+      saEl.innerHTML = '<div class="card" style="margin-bottom:1rem;">' +
+        '<div class="card-title">Savings, auto-allocated <span onclick="showPage(\'goals\')">Manage →</span></div>' +
+        rows.map(r =>
+          '<div style="display:flex;justify-content:space-between;align-items:center;padding:0.4rem 0;border-bottom:1px solid #f6f6f6;">' +
+            '<div style="display:flex;align-items:center;gap:0.5rem;">' +
+              '<span>' + r.icon + '</span>' +
+              '<span style="font-size:0.82rem;font-weight:600;">' + r.label + '</span>' +
+              (r.sub ? '<span style="font-size:0.66rem;color:var(--text2);">· ' + r.sub + '</span>' : '') +
+            '</div>' +
+            '<span style="font-size:0.9rem;font-weight:800;color:' + r.color + ';">' + fmt(r.val) + '</span>' +
+          '</div>'
+        ).join('') +
+        '<div style="display:flex;justify-content:space-between;align-items:center;padding-top:0.5rem;margin-top:0.15rem;">' +
+          '<span style="font-size:0.8rem;font-weight:700;">Savings balance</span>' +
+          '<span style="font-size:0.95rem;font-weight:900;">' + fmt(bal) + '</span>' +
+        '</div>' +
+      '</div>';
     }
   }
 
@@ -3866,18 +3931,84 @@ function deleteAnnual(id) {
 // GOALS
 // ════════════════════════════════════════════════════════════
 // ── Goal progress = manual starting amount + auto-populated planner allocations ──
-function goalAutoSaved(g) {
-  let sum = 0;
-  Object.values(state.plannerWeeks || {}).forEach(pw => {
-    if (pw && pw.pay && pw.pay !== '' && pw.goalAlloc && pw.goalAlloc[g.id]) {
-      sum += pw.goalAlloc[g.id];
-    }
+// ── Savings allocation engine ────────────────────────────────
+// The Savings Account balance (computed from your transactions) is the single
+// source of truth. It is divided automatically: (1) reserve what should be set
+// aside for upcoming annual bills, (2) fund goals in deadline order — keeping
+// each on pace first, then topping up the nearest, (3) whatever's left is a
+// free buffer. Nothing here needs manual entry once the balance is set once.
+let _saCache = null;
+function invalidateSavingsAlloc() { _saCache = null; }
+
+function weeksBetweenDates(a, b) {
+  const [ay,am,ad] = a.split('-').map(Number);
+  const [by,bm,bd] = b.split('-').map(Number);
+  return Math.round((Date.UTC(by,bm-1,bd) - Date.UTC(ay,am-1,ad)) / (7*86400000));
+}
+function monthsUntilDue(dueMonth) {
+  const [ , tm ] = brisbaneToday().split('-').map(Number);
+  return (dueMonth - tm + 12) % 12; // 0 = due this month … 11 = due in 11 months
+}
+function goalOnTrackAmount(g) {
+  // How much SHOULD be saved toward this goal by now, given its timeline
+  if (!g.target || !g.date) return 0;
+  const created = g.createdAt || brisbaneToday();
+  const totalWks = Math.max(1, weeksBetweenDates(created, g.date));
+  const rate = g.target / totalWks;
+  const elapsed = Math.max(0, weeksBetweenDates(created, brisbaneToday()));
+  return Math.min(g.target, Math.round(rate * elapsed * 100) / 100);
+}
+
+function computeSavingsAllocation() {
+  const savBalRaw = computeAccountBalance('Savings Account');
+  const hasBalance = savBalRaw !== null;
+  const savingsBal = hasBalance ? savBalRaw : 0;
+  let remaining = Math.max(0, savingsBal);
+
+  // 1. Annual-bill sinking funds — reserve what should be accrued by now
+  //    (assumes a 12-month save cycle; nearest due dates reserved first)
+  const annual = (state.annualExpenses || []).map(e => {
+    const mUntil = monthsUntilDue(e.month);
+    const progress = Math.max(0, Math.min(1, (12 - mUntil) / 12));
+    const shouldHave = Math.round((e.amount || 0) * progress * 100) / 100;
+    return { id: e.id, name: e.name, amount: e.amount, month: e.month, mUntil, shouldHave, reserved: 0 };
+  }).sort((a, b) => a.mUntil - b.mUntil);
+  annual.forEach(e => { e.reserved = Math.min(remaining, e.shouldHave); remaining = Math.round((remaining - e.reserved) * 100) / 100; });
+  const annualReserved = Math.round(annual.reduce((a, e) => a + e.reserved, 0) * 100) / 100;
+  const annualNeeded   = Math.round(annual.reduce((a, e) => a + e.shouldHave, 0) * 100) / 100;
+
+  // 2. Goals — deadline order. Pass 1 keeps each on pace, pass 2 tops up nearest.
+  const goals = state.goals.filter(g => (g.target || 0) > 0);
+  const sorted = [...goals].sort((a, b) => (a.date || '9999-99-99').localeCompare(b.date || '9999-99-99'));
+  const goalAlloc = {};
+  sorted.forEach(g => { goalAlloc[g.id] = 0; });
+  sorted.forEach(g => {
+    const onTrack = Math.min(g.target || 0, goalOnTrackAmount(g));
+    const add = Math.min(remaining, onTrack);
+    goalAlloc[g.id] += add; remaining = Math.round((remaining - add) * 100) / 100;
   });
-  return Math.round(sum * 100) / 100;
+  sorted.forEach(g => {
+    const room = (g.target || 0) - goalAlloc[g.id];
+    const add = Math.min(remaining, Math.max(0, room));
+    goalAlloc[g.id] += add; remaining = Math.round((remaining - add) * 100) / 100;
+  });
+  Object.keys(goalAlloc).forEach(k => { goalAlloc[k] = Math.round(goalAlloc[k] * 100) / 100; });
+  const goalsReserved = Math.round(Object.values(goalAlloc).reduce((a, v) => a + v, 0) * 100) / 100;
+
+  return { savingsBal, hasBalance, annual, annualReserved, annualNeeded,
+           goalAlloc, goalsReserved, buffer: Math.round(remaining * 100) / 100 };
 }
+function savingsAllocation() {
+  if (_saCache === null) _saCache = computeSavingsAllocation();
+  return _saCache;
+}
+
+// goalSaved now reflects REAL money: the goal's share of your savings balance.
 function goalSaved(g) {
-  return Math.round(((g.saved || 0) + goalAutoSaved(g)) * 100) / 100;
+  return savingsAllocation().goalAlloc[g.id] || 0;
 }
+// Back-compat: some views referenced planner auto-population; keep a stub.
+function goalAutoSaved(g) { return goalSaved(g); }
 
 function getGoalStatus(g) {
   const wks = weeksUntil(g.date);
@@ -3897,25 +4028,37 @@ function renderGoals() {
     return a + (wks > 0 ? needed/wks : 0);
   }, 0);
   const affordable = s.weeklyPay - (s.rent/2) - (s.weeklyPay*s.savingsPct) - totalGoalPerWk >= 0; // rent/2 = weekly accrual
-  // Reconciliation: goals' total progress vs actual Savings Account balance
-  const savBal = computeAccountBalance('Savings Account');
-  const totalGoalSaved = state.goals.reduce((a, g) => a + goalSaved(g), 0);
+  // Savings allocation breakdown — where your real savings balance is going
+  const alloc = savingsAllocation();
   const reconEl = document.getElementById('goals-recon');
   if (reconEl) {
-    if (savBal === null || !state.goals.length) {
-      reconEl.innerHTML = '';
+    if (!alloc.hasBalance) {
+      reconEl.innerHTML = '<div class="card" style="margin-bottom:1rem;padding:0.85rem 1rem;display:flex;justify-content:space-between;align-items:center;">' +
+        '<div style="font-size:0.8rem;color:var(--text2);">🔗 Set your Savings Account balance to auto-fund goals</div>' +
+        '<span style="font-size:0.75rem;color:var(--accent);cursor:pointer;font-weight:700;" onclick="showPage(\'dashboard\')">Set up →</span>' +
+      '</div>';
     } else {
-      const covered = savBal >= totalGoalSaved;
-      const diff = Math.round((savBal - totalGoalSaved) * 100) / 100;
-      reconEl.innerHTML = '<div class="card" style="margin-bottom:1rem;border-left:3px solid ' + (covered ? 'var(--green)' : 'var(--orange)') + ';">' +
-        '<div style="display:flex;justify-content:space-between;align-items:center;">' +
-          '<div>' +
-            '<div style="font-size:0.8rem;font-weight:700;">' + (covered ? '✅ Goals fully backed by savings' : '⚠️ Goals ahead of savings balance') + '</div>' +
-            '<div style="font-size:0.7rem;color:var(--text2);margin-top:0.15rem;">Savings balance ' + fmt(savBal) + ' vs ' + fmt(totalGoalSaved) + ' allocated to goals</div>' +
-          '</div>' +
-          '<div style="font-size:0.95rem;font-weight:800;color:' + (covered ? 'var(--green)' : 'var(--orange)') + ';">' + (diff >= 0 ? '+' : '') + fmt(diff) + '</div>' +
+      const bal = alloc.savingsBal;
+      const segBills  = bal > 0 ? Math.round(alloc.annualReserved / bal * 100) : 0;
+      const segGoals  = bal > 0 ? Math.round(alloc.goalsReserved  / bal * 100) : 0;
+      const segBuffer = Math.max(0, 100 - segBills - segGoals);
+      reconEl.innerHTML = '<div class="card" style="margin-bottom:1rem;">' +
+        '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.6rem;">' +
+          '<div style="font-size:0.8rem;font-weight:700;">🔗 Savings auto-allocated</div>' +
+          '<div style="font-size:1rem;font-weight:800;">' + fmt(bal) + '</div>' +
         '</div>' +
-        (!covered ? '<div style="font-size:0.7rem;color:var(--text2);margin-top:0.4rem;">Transfer the difference into savings, or check that planner weeks were only saved when you actually moved the money.</div>' : '') +
+        '<div style="display:flex;height:12px;border-radius:20px;overflow:hidden;background:#f0f0f0;margin-bottom:0.6rem;">' +
+          (segBills  > 0 ? '<div style="width:' + segBills  + '%;background:var(--orange);"></div>' : '') +
+          (segGoals  > 0 ? '<div style="width:' + segGoals  + '%;background:var(--green);"></div>'  : '') +
+          (segBuffer > 0 ? '<div style="width:' + segBuffer + '%;background:#cfd8dc;"></div>'        : '') +
+        '</div>' +
+        '<div style="display:flex;gap:1rem;flex-wrap:wrap;font-size:0.72rem;">' +
+          '<div style="display:flex;align-items:center;gap:0.3rem;"><span style="width:9px;height:9px;border-radius:2px;background:var(--orange);display:inline-block;"></span>Bills reserve ' + fmt(alloc.annualReserved) + '</div>' +
+          '<div style="display:flex;align-items:center;gap:0.3rem;"><span style="width:9px;height:9px;border-radius:2px;background:var(--green);display:inline-block;"></span>Goals ' + fmt(alloc.goalsReserved) + '</div>' +
+          '<div style="display:flex;align-items:center;gap:0.3rem;"><span style="width:9px;height:9px;border-radius:2px;background:#cfd8dc;display:inline-block;"></span>Free buffer ' + fmt(alloc.buffer) + '</div>' +
+        '</div>' +
+        (alloc.annualReserved < alloc.annualNeeded ?
+          '<div style="font-size:0.7rem;color:var(--orange);margin-top:0.5rem;">⚠️ Bills sinking fund is ' + fmt(alloc.annualNeeded - alloc.annualReserved) + ' short of where it should be — top up savings when you can.</div>' : '') +
       '</div>';
     }
   }
@@ -3937,8 +4080,9 @@ function renderGoals() {
   document.getElementById('goals-list').innerHTML = state.goals.map(g => {
     const wks = weeksUntil(g.date);
     const status = getGoalStatus(g);
-    const autoAmt = goalAutoSaved(g);
     const totalSaved = goalSaved(g);
+    const onTrackAmt = goalOnTrackAmount(g);
+    const behind = Math.round((onTrackAmt - totalSaved) * 100) / 100;
     const pct = Math.min(100, (totalSaved/g.target)*100);
     const needed = Math.max(0, g.target - totalSaved);
     const perWk = wks > 0 ? needed/wks : 0;
@@ -3955,9 +4099,10 @@ function renderGoals() {
       ${g.note ? `<div style="font-size:0.75rem;color:var(--text2);margin-bottom:0.4rem;">${g.note}</div>` : ''}
       <div class="progress-wrap"><div class="progress-bar" style="width:${pct}%;background:var(--green);"></div></div>
       <div class="goal-amounts">
-        <span>${fmt(totalSaved)} saved of ${fmt(g.target)}${autoAmt > 0 ? ` <span style="font-size:0.68rem;color:var(--accent);">(${fmt(autoAmt)} auto)</span>` : ''}</span>
+        <span>${fmt(totalSaved)} backed of ${fmt(g.target)} <span style="font-size:0.68rem;color:var(--accent);">from savings</span></span>
         <span>${wks !== null ? wks + ' weeks left' : 'No deadline'}</span>
       </div>
+      ${status !== 'COMPLETE' && behind > 0.5 ? `<div style="font-size:0.7rem;color:var(--orange);margin-top:0.3rem;">Behind pace by ${fmt(behind)} — add to savings to catch up</div>` : status !== 'COMPLETE' && onTrackAmt > 0 ? `<div style="font-size:0.7rem;color:var(--green);margin-top:0.3rem;">✅ On pace</div>` : ''}
       ${wks > 0 && needed > 0 ? `<div style="margin-top:0.5rem;padding:0.5rem;background:#F8F8F8;border-radius:8px;font-size:0.8rem;text-align:center;">Save <strong>${fmt(perWk)}/week</strong> or <strong>${fmt(perWk*2)}/fortnight</strong> to hit this goal</div>` : ''}
     </div>`;
   }).join('');
@@ -3989,7 +4134,7 @@ async function saveGoal() {
     id: id || uid(),
     name:   document.getElementById('g-name').value,
     target: newTarget,
-    saved:  parseFloat(document.getElementById('g-saved').value)||0,
+    saved:  0, // progress now derived from savings balance, not manual entry
     date:   newDate,
     note:   document.getElementById('g-note').value,
     // Store creation date so weeklyTarget can be calculated correctly from day 1
