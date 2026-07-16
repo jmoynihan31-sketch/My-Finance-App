@@ -824,6 +824,27 @@ select.form-input { appearance: none; background-image: url("data:image/svg+xml,
   </div>
 </div>
 
+<!-- Jar Modal -->
+<div class="modal-overlay" id="jar-modal">
+  <div class="modal">
+    <div class="modal-handle"></div>
+    <h2 id="jar-modal-title">Add Jar</h2>
+    <input type="hidden" id="jar-edit-id">
+    <div class="form-group"><label class="form-label">Jar Name</label><input class="form-input" id="jar-name" placeholder="e.g. Aggressive, Moderate"></div>
+    <div class="form-row">
+      <div class="form-group"><label class="form-label">Current Balance ($)</label><input class="form-input" id="jar-bal" type="number" step="0.01" placeholder="800.00"></div>
+      <div class="form-group"><label class="form-label">As at</label><input class="form-input" id="jar-date" type="date"></div>
+    </div>
+    <div class="form-group"><label class="form-label">Weekly Split ($ of each Raiz transfer)</label><input class="form-input" id="jar-split" type="number" step="0.01" placeholder="e.g. 10"></div>
+    <div style="font-size:0.72rem;color:var(--text2);margin-bottom:1rem;">Transfers are allocated to jars proportionally by split — e.g. splits of $10 and $30 give this jar 25% of every raiz transfer, whatever its size.</div>
+    <div class="form-actions">
+      <button class="btn btn-outline btn-full" onclick="closeModal('jar-modal')">Cancel</button>
+      <button class="btn btn-primary btn-full" onclick="saveJar()">Save</button>
+    </div>
+    <button class="btn btn-outline btn-full" id="jar-delete-btn" style="display:none;margin-top:0.5rem;color:var(--red);border-color:var(--red);" onclick="deleteJar()">Delete Jar</button>
+  </div>
+</div>
+
 <!-- Balance Modal -->
 <div class="modal-overlay" id="balance-modal">
   <div class="modal">
@@ -1116,7 +1137,7 @@ function migrateState() {
     });
   }
   if (!state.accountBalances) state.accountBalances = {};
-  if (!state.raiz) state.raiz = { startBalance: null, startDate: null, weeklyRates: {} };
+  if (!state.raiz) state.raiz = { jars: [] };
   if (!state.accountMap) state.accountMap = {};
 }
 
@@ -3405,148 +3426,271 @@ function renderTaxYear() {
 }
 
 // ════════════════════════════════════════════════════════════
-// RAIZ INVESTMENT TRACKER
+// RAIZ INVESTMENT TRACKER — multi-jar, monthly performance
 // ════════════════════════════════════════════════════════════
-function getRaizTransfersForWeek(wk) {
-  // Money into Raiz = External Savings Transfer debits mentioning raiz
-  return state.transactions
-    .filter(t => t.category === 'External Savings Transfer' && t.debit > 0 &&
-                 t.description.toLowerCase().includes('raiz') &&
-                 getWeekKey(t.date) === wk)
-    .reduce((a,t) => a + t.debit, 0);
-}
-function raizWeekKeysSinceStart() {
+function migrateRaiz() {
+  // Old single-portfolio shape → jars array
   const r = state.raiz || {};
-  if (!r.startDate) return [];
-  const startWk = getWeekKey(r.startDate);
-  const nowWk = currentWeekKey();
+  if (r.jars) return;
+  const jars = [];
+  if (r.startBalance !== null && r.startBalance !== undefined && r.startDate) {
+    // Compound any old weekly rates into monthly equivalents
+    const monthlyRates = {};
+    Object.entries(r.weeklyRates || {}).forEach(([wk, rate]) => {
+      const mk = wk.substring(0, 7);
+      const factor = (monthlyRates[mk] !== undefined ? 1 + monthlyRates[mk]/100 : 1) * (1 + rate/100);
+      monthlyRates[mk] = Math.round((factor - 1) * 10000) / 100;
+    });
+    jars.push({ id: uid(), name: 'Jar 1', startBalance: r.startBalance, startDate: r.startDate,
+                weeklySplit: 40, monthlyRates });
+  }
+  state.raiz = { jars };
+}
+
+function raizMonthKeysSince(startDate) {
+  const startMk = startDate.substring(0, 7);
+  const nowMk = brisbaneToday().substring(0, 7);
   const keys = [];
-  let [y,m,d] = startWk.split('-').map(Number);
-  let cur = Date.UTC(y, m-1, d);
-  const [ny,nm,nd] = nowWk.split('-').map(Number);
-  const end = Date.UTC(ny, nm-1, nd);
-  while (cur <= end && keys.length < 260) {
-    const dt = new Date(cur);
-    keys.push(dt.getUTCFullYear() + '-' + String(dt.getUTCMonth()+1).padStart(2,'0') + '-' + String(dt.getUTCDate()).padStart(2,'0'));
-    cur += 7 * 86400000;
+  let [y, m] = startMk.split('-').map(Number);
+  while (keys.length < 120) {
+    const mk = y + '-' + String(m).padStart(2, '0');
+    keys.push(mk);
+    if (mk === nowMk) break;
+    m++; if (m > 12) { m = 1; y++; }
   }
   return keys;
 }
-function computeRaizProgression() {
-  // Week by week: balance = prev * (1 + rate%) + transfers that week
-  const r = state.raiz || {};
-  if (r.startBalance === null || r.startBalance === undefined || !r.startDate) return null;
-  const weeks = raizWeekKeysSinceStart();
-  let bal = r.startBalance;
+
+function raizTransfersForMonth(mk, sinceDate) {
+  // Total money into Raiz that calendar month (on/after tracking start date)
+  return state.transactions
+    .filter(t => t.category === 'External Savings Transfer' && t.debit > 0 &&
+                 t.description.toLowerCase().includes('raiz') &&
+                 t.date.substring(0, 7) === mk && t.date >= sinceDate)
+    .reduce((a, t) => a + t.debit, 0);
+}
+
+function computeJarProgression(jar) {
+  // Month by month: balance = prev * (1 + monthlyRate%) + jar's share of that month's transfers
+  const jars = (state.raiz.jars || []);
+  const totalSplit = jars.reduce((a, j) => a + (j.weeklySplit || 0), 0);
+  const share = totalSplit > 0 ? (jar.weeklySplit || 0) / totalSplit : (1 / Math.max(jars.length, 1));
+  const months = raizMonthKeysSince(jar.startDate);
+  let bal = jar.startBalance;
   let totalContrib = 0, totalGrowth = 0;
-  const rows = weeks.map(wk => {
-    const rate = (r.weeklyRates || {})[wk];
-    const growth = rate !== undefined ? Math.round(bal * (rate/100) * 100) / 100 : 0;
-    const contrib = getRaizTransfersForWeek(wk);
+  const rows = months.map(mk => {
+    const rate = (jar.monthlyRates || {})[mk];
+    const growth = rate !== undefined ? Math.round(bal * (rate / 100) * 100) / 100 : 0;
+    const contrib = Math.round(raizTransfersForMonth(mk, jar.startDate) * share * 100) / 100;
     bal = Math.round((bal + growth + contrib) * 100) / 100;
     totalContrib += contrib;
-    totalGrowth  += growth;
-    return { wk, rate, growth, contrib, bal };
+    totalGrowth += growth;
+    return { mk, rate, growth, contrib, bal };
   });
-  return { rows, balance: bal, totalContrib: Math.round(totalContrib*100)/100, totalGrowth: Math.round(totalGrowth*100)/100 };
+  return { rows, balance: bal,
+           totalContrib: Math.round(totalContrib * 100) / 100,
+           totalGrowth: Math.round(totalGrowth * 100) / 100,
+           share };
+}
+
+function raizMonthLabel(mk) {
+  const [y, m] = mk.split('-').map(Number);
+  return new Date(Date.UTC(y, m - 1, 1)).toLocaleDateString('en-AU', { month: 'long', year: 'numeric', timeZone: 'UTC' });
 }
 
 function renderRaiz() {
+  migrateRaiz();
   const el = document.getElementById('raiz-content');
-  const r = state.raiz || {};
+  const jars = state.raiz.jars || [];
 
-  // Setup state — no starting balance yet
-  if (r.startBalance === null || r.startBalance === undefined || !r.startDate) {
+  // ── Setup state — no jars yet ──
+  if (!jars.length) {
     el.innerHTML =
       '<div class="card" style="background:var(--dark);color:#fff;margin-bottom:1rem;">' +
         '<div style="font-size:0.75rem;opacity:0.7;text-transform:uppercase;letter-spacing:0.08em;margin-bottom:0.25rem;">Raiz Tracker</div>' +
-        '<div style="font-size:1.3rem;font-weight:800;">Investment Portfolio</div>' +
-        '<div style="font-size:0.8rem;opacity:0.7;margin-top:0.2rem;">Track your Raiz balance with weekly growth rates — no statements needed</div>' +
+        '<div style="font-size:1.3rem;font-weight:800;">Investment Jars</div>' +
+        '<div style="font-size:0.8rem;opacity:0.7;margin-top:0.2rem;">Track each jar separately — enter monthly performance from the Raiz app</div>' +
       '</div>' +
       '<div class="card">' +
-        '<div class="card-title">Set your starting balance</div>' +
-        '<div style="font-size:0.8rem;color:var(--text2);margin-bottom:1rem;">Enter your current Raiz balance once. From then on, the app updates it automatically using your weekly growth % and any transfers labelled &#39;raiz&#39; in your transactions.</div>' +
-        '<div class="form-row">' +
-          '<div class="form-group"><label class="form-label">Current Balance ($)</label><input class="form-input" id="raiz-start-bal" type="number" step="0.01" placeholder="1500.00"></div>' +
-          '<div class="form-group"><label class="form-label">As at</label><input class="form-input" id="raiz-start-date" type="date" value="' + brisbaneToday() + '"></div>' +
+        '<div class="card-title">How it works</div>' +
+        '<div style="font-size:0.8rem;color:var(--text2);line-height:1.6;margin-bottom:1rem;">' +
+          '1. Add a jar for each Raiz portfolio with its current balance<br>' +
+          '2. Set each jar&#39;s weekly split — how much of your Raiz transfer goes into it (e.g. $10 and $30)<br>' +
+          '3. Each month, enter the % performance shown in the Raiz app per jar<br>' +
+          'Transfers labelled &#39;raiz&#39; in your transactions are allocated to jars automatically by their split ratio.' +
         '</div>' +
-        '<button class="btn btn-primary btn-full" onclick="startRaiz()">Start Tracking</button>' +
+        '<button class="btn btn-primary btn-full" onclick="openJarModal()">+ Add First Jar</button>' +
       '</div>';
     return;
   }
 
-  const prog = computeRaizProgression();
-  const nowWk = currentWeekKey();
-  const currentRate = (r.weeklyRates || {})[nowWk];
-  const gainPct = r.startBalance > 0 ? ((prog.balance - r.startBalance - prog.totalContrib) / r.startBalance * 100).toFixed(1) : '0.0';
+  const progs = jars.map(j => ({ jar: j, p: computeJarProgression(j) }));
+  const totalBal     = progs.reduce((a, x) => a + x.p.balance, 0);
+  const totalContrib = progs.reduce((a, x) => a + x.p.totalContrib, 0);
+  const totalGrowth  = progs.reduce((a, x) => a + x.p.totalGrowth, 0);
+  const totalSplit   = jars.reduce((a, j) => a + (j.weeklySplit || 0), 0);
+  const nowMk = brisbaneToday().substring(0, 7);
+
+  // Union of all month keys (oldest jar defines range)
+  const allMonths = [...new Set(progs.flatMap(x => x.p.rows.map(r => r.mk)))].sort();
 
   el.innerHTML =
+    // Header — combined balance
     '<div class="card" style="background:var(--dark);color:#fff;margin-bottom:1rem;">' +
-      '<div style="display:flex;justify-content:space-between;align-items:flex-start;">' +
-        '<div>' +
-          '<div style="font-size:0.75rem;opacity:0.7;text-transform:uppercase;letter-spacing:0.08em;margin-bottom:0.25rem;">Raiz Balance</div>' +
-          '<div style="font-size:2rem;font-weight:900;">' + fmt(prog.balance) + '</div>' +
-          '<div style="font-size:0.75rem;opacity:0.7;margin-top:0.2rem;">Started ' + r.startDate + ' at ' + fmt(r.startBalance) + '</div>' +
-        '</div>' +
-        '<span style="font-size:0.7rem;color:rgba(255,255,255,0.7);cursor:pointer;border:1px solid rgba(255,255,255,0.3);border-radius:6px;padding:0.2rem 0.5rem;" onclick="resetRaiz()">Reset</span>' +
-      '</div>' +
+      '<div style="font-size:0.75rem;opacity:0.7;text-transform:uppercase;letter-spacing:0.08em;margin-bottom:0.25rem;">Raiz — All Jars</div>' +
+      '<div style="font-size:2rem;font-weight:900;">' + fmt(totalBal) + '</div>' +
+      '<div style="font-size:0.75rem;opacity:0.7;margin-top:0.2rem;">' + jars.length + ' jar' + (jars.length !== 1 ? 's' : '') + ' · ' + fmt(totalSplit) + '/wk total split</div>' +
     '</div>' +
 
     '<div class="kpi-grid" style="margin-bottom:1rem;">' +
-      '<div class="kpi-card green"><div class="kpi-label">Contributed</div><div class="kpi-value">' + fmtK(prog.totalContrib) + '</div><div class="kpi-sub">Raiz transfers</div></div>' +
-      '<div class="kpi-card ' + (prog.totalGrowth >= 0 ? 'green' : 'red') + '"><div class="kpi-label">Market Growth</div><div class="kpi-value" style="color:' + (prog.totalGrowth>=0?'var(--green)':'var(--red)') + ';">' + (prog.totalGrowth>=0?'+':'') + fmtK(prog.totalGrowth) + '</div><div class="kpi-sub">' + gainPct + '% on start</div></div>' +
+      '<div class="kpi-card green"><div class="kpi-label">Contributed</div><div class="kpi-value">' + fmtK(totalContrib) + '</div><div class="kpi-sub">Since tracking began</div></div>' +
+      '<div class="kpi-card ' + (totalGrowth >= 0 ? 'green' : 'red') + '"><div class="kpi-label">Market Growth</div><div class="kpi-value" style="color:' + (totalGrowth >= 0 ? 'var(--green)' : 'var(--red)') + ';">' + (totalGrowth >= 0 ? '+' : '') + fmtK(totalGrowth) + '</div><div class="kpi-sub">All jars combined</div></div>' +
     '</div>' +
 
+    // Jar cards
+    progs.map(x => {
+      const j = x.jar, p = x.p;
+      const rateThisMonth = (j.monthlyRates || {})[nowMk];
+      const growthPct = j.startBalance > 0 ? ((p.balance - j.startBalance - p.totalContrib) / j.startBalance * 100).toFixed(1) : '0.0';
+      return '<div class="card" style="margin-bottom:0.75rem;">' +
+        '<div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:0.5rem;">' +
+          '<div>' +
+            '<div style="font-size:0.95rem;font-weight:800;">🫙 ' + j.name + '</div>' +
+            '<div style="font-size:0.7rem;color:var(--text2);margin-top:0.15rem;">' + fmt(j.weeklySplit || 0) + '/wk split (' + Math.round(p.share * 100) + '%) · started ' + j.startDate + '</div>' +
+          '</div>' +
+          '<div style="text-align:right;">' +
+            '<div style="font-size:1.2rem;font-weight:900;">' + fmt(p.balance) + '</div>' +
+            '<span style="font-size:0.7rem;color:var(--accent);cursor:pointer;font-weight:700;" data-jid="' + j.id + '" onclick="openJarModal(this.dataset.jid)">Edit</span>' +
+          '</div>' +
+        '</div>' +
+        '<div style="display:flex;gap:1rem;font-size:0.72rem;color:var(--text2);">' +
+          '<span>In: <strong style="color:var(--text);">' + fmt(p.totalContrib) + '</strong></span>' +
+          '<span>Growth: <strong style="color:' + (p.totalGrowth >= 0 ? 'var(--green)' : 'var(--red)') + ';">' + (p.totalGrowth >= 0 ? '+' : '') + fmt(p.totalGrowth) + ' (' + growthPct + '%)</strong></span>' +
+          '<span>' + raizMonthLabel(nowMk).split(' ')[0] + ': <strong style="color:' + (rateThisMonth !== undefined ? 'var(--green)' : 'var(--orange)') + ';">' + (rateThisMonth !== undefined ? rateThisMonth + '% ✓' : 'not entered') + '</strong></span>' +
+        '</div>' +
+      '</div>';
+    }).join('') +
+
+    '<div style="display:flex;justify-content:flex-end;margin-bottom:1rem;">' +
+      '<button class="btn btn-outline btn-sm" onclick="openJarModal()">+ Add Jar</button>' +
+    '</div>' +
+
+    // Monthly performance entry
     '<div class="card" style="margin-bottom:1rem;">' +
-      '<div class="card-title">This Week&#39;s Growth Rate</div>' +
-      '<div style="font-size:0.78rem;color:var(--text2);margin-bottom:0.75rem;">Enter the % your portfolio moved this week (from the Raiz app). Negative values are fine for down weeks.</div>' +
-      '<div style="display:flex;gap:0.5rem;align-items:center;">' +
-        '<input class="form-input" id="raiz-week-rate" type="number" step="0.01" placeholder="e.g. 0.45" value="' + (currentRate !== undefined ? currentRate : '') + '" style="flex:1;">' +
-        '<span style="font-weight:700;color:var(--text2);">%</span>' +
-        '<button class="btn btn-primary btn-sm" onclick="saveRaizRate()">Save</button>' +
+      '<div class="card-title">Monthly Performance</div>' +
+      '<div style="font-size:0.78rem;color:var(--text2);margin-bottom:0.75rem;">Enter each jar&#39;s % for the month, straight from the Raiz app. Negative values are fine.</div>' +
+      '<div class="form-group"><label class="form-label">Month</label>' +
+        '<select class="form-input" id="raiz-month-select" onchange="onRaizMonthChange()">' +
+          allMonths.slice().reverse().map(mk =>
+            '<option value="' + mk + '"' + (mk === nowMk ? ' selected' : '') + '>' + raizMonthLabel(mk) + (mk === nowMk ? ' (current)' : '') + '</option>'
+          ).join('') +
+        '</select>' +
       '</div>' +
-      '<div style="font-size:0.7rem;color:var(--text2);margin-top:0.5rem;">Week: ' + getWeekLabel(nowWk) + (currentRate !== undefined ? ' · saved ✅' : ' · not yet entered') + '</div>' +
+      jars.map(j => {
+        const val = (j.monthlyRates || {})[nowMk];
+        return '<div style="display:flex;gap:0.5rem;align-items:center;margin-bottom:0.5rem;">' +
+          '<span style="flex:1;font-size:0.85rem;font-weight:600;">🫙 ' + j.name + '</span>' +
+          '<input class="form-input" type="number" step="0.01" placeholder="e.g. 1.2" style="width:100px;text-align:right;" id="raiz-rate-' + j.id + '" value="' + (val !== undefined ? val : '') + '">' +
+          '<span style="font-weight:700;color:var(--text2);">%</span>' +
+        '</div>';
+      }).join('') +
+      '<button class="btn btn-primary btn-full" style="margin-top:0.5rem;" onclick="saveRaizMonthRates()">Save Month</button>' +
     '</div>' +
 
+    // Monthly history
     '<div class="card">' +
-      '<div class="card-title">Weekly History</div>' +
-      (prog.rows.length ?
-        prog.rows.slice().reverse().slice(0, 16).map(row =>
-          '<div style="display:flex;justify-content:space-between;align-items:center;padding:0.5rem 0;border-bottom:1px solid #f5f5f5;">' +
-            '<div>' +
-              '<div style="font-size:0.8rem;font-weight:700;">' + getWeekLabel(row.wk) + '</div>' +
-              '<div style="font-size:0.68rem;color:var(--text2);">' +
-                (row.rate !== undefined ? (row.rate>=0?'+':'') + row.rate + '% (' + (row.growth>=0?'+':'') + fmt(row.growth) + ')' : 'no rate entered') +
-                (row.contrib > 0 ? ' · +' + fmt(row.contrib) + ' in' : '') +
-              '</div>' +
-            '</div>' +
-            '<div style="font-weight:800;font-size:0.9rem;">' + fmt(row.bal) + '</div>' +
-          '</div>'
-        ).join('') :
-        '<p style="font-size:0.8rem;color:var(--text2);">History builds week by week</p>') +
+      '<div class="card-title">Monthly History</div>' +
+      (allMonths.length ?
+        allMonths.slice().reverse().slice(0, 12).map(mk => {
+          const monthBits = progs.map(x => {
+            const row = x.p.rows.find(r => r.mk === mk);
+            if (!row) return '';
+            return '<div style="display:flex;justify-content:space-between;font-size:0.72rem;color:var(--text2);padding:0.1rem 0;">' +
+              '<span>🫙 ' + x.jar.name + (row.rate !== undefined ? ' · ' + (row.rate >= 0 ? '+' : '') + row.rate + '%' : ' · no rate') + (row.contrib > 0 ? ' · +' + fmt(row.contrib) + ' in' : '') + '</span>' +
+              '<span style="font-weight:700;color:var(--text);">' + fmt(row.bal) + '</span>' +
+            '</div>';
+          }).join('');
+          const monthTotal = progs.reduce((a, x) => { const r = x.p.rows.find(r2 => r2.mk === mk); return a + (r ? r.bal : 0); }, 0);
+          return '<div style="padding:0.55rem 0;border-bottom:1px solid #f5f5f5;">' +
+            '<div style="display:flex;justify-content:space-between;margin-bottom:0.2rem;">' +
+              '<span style="font-size:0.8rem;font-weight:800;">' + raizMonthLabel(mk) + '</span>' +
+              '<span style="font-size:0.85rem;font-weight:800;">' + fmt(monthTotal) + '</span>' +
+            '</div>' + monthBits +
+          '</div>';
+        }).join('') :
+        '<p style="font-size:0.8rem;color:var(--text2);">History builds month by month</p>') +
     '</div>';
 }
 
-function startRaiz() {
-  const bal = parseFloat(document.getElementById('raiz-start-bal').value);
-  const date = document.getElementById('raiz-start-date').value;
-  if (isNaN(bal) || !date) { showToast('Please enter a balance and date'); return; }
-  state.raiz = { startBalance: bal, startDate: date, weeklyRates: {} };
-  saveStateSync(); renderRaiz();
-  showToast('Raiz tracking started');
+function onRaizMonthChange() {
+  const mk = document.getElementById('raiz-month-select').value;
+  (state.raiz.jars || []).forEach(j => {
+    const inp = document.getElementById('raiz-rate-' + j.id);
+    if (inp) {
+      const val = (j.monthlyRates || {})[mk];
+      inp.value = val !== undefined ? val : '';
+    }
+  });
 }
-function saveRaizRate() {
-  const rate = parseFloat(document.getElementById('raiz-week-rate').value);
-  if (isNaN(rate)) { showToast('Please enter a rate (e.g. 0.45 or -0.3)'); return; }
-  if (!state.raiz.weeklyRates) state.raiz.weeklyRates = {};
-  state.raiz.weeklyRates[currentWeekKey()] = rate;
+
+function saveRaizMonthRates() {
+  const mk = document.getElementById('raiz-month-select').value;
+  let saved = 0;
+  (state.raiz.jars || []).forEach(j => {
+    const inp = document.getElementById('raiz-rate-' + j.id);
+    if (!inp) return;
+    const v = inp.value.trim();
+    if (v === '') return;
+    const rate = parseFloat(v);
+    if (isNaN(rate)) return;
+    if (!j.monthlyRates) j.monthlyRates = {};
+    j.monthlyRates[mk] = rate;
+    saved++;
+  });
+  if (!saved) { showToast('Enter at least one rate'); return; }
   saveStateSync(); renderRaiz();
-  showToast('Rate saved for this week');
+  showToast(raizMonthLabel(mk) + ' saved for ' + saved + ' jar' + (saved !== 1 ? 's' : ''));
 }
-function resetRaiz() {
-  if (!confirm('Reset Raiz tracking? Your weekly rates will be cleared.')) return;
-  state.raiz = { startBalance: null, startDate: null, weeklyRates: {} };
-  saveStateSync(); renderRaiz();
+
+function openJarModal(id) {
+  document.getElementById('jar-edit-id').value = id || '';
+  document.getElementById('jar-modal-title').textContent = id ? 'Edit Jar' : 'Add Jar';
+  const j = id ? (state.raiz.jars || []).find(x => x.id === id) : null;
+  document.getElementById('jar-name').value  = j ? j.name : ('Jar ' + ((state.raiz.jars || []).length + 1));
+  document.getElementById('jar-bal').value   = j ? j.startBalance : '';
+  document.getElementById('jar-date').value  = j ? j.startDate : brisbaneToday();
+  document.getElementById('jar-split').value = j ? j.weeklySplit : '';
+  document.getElementById('jar-delete-btn').style.display = id ? 'block' : 'none';
+  openModal('jar-modal');
+}
+
+function saveJar() {
+  const id    = document.getElementById('jar-edit-id').value;
+  const name  = document.getElementById('jar-name').value.trim();
+  const bal   = parseFloat(document.getElementById('jar-bal').value);
+  const date  = document.getElementById('jar-date').value;
+  const split = parseFloat(document.getElementById('jar-split').value);
+  if (!name || isNaN(bal) || !date || isNaN(split)) { showToast('Please fill in all fields'); return; }
+  if (!state.raiz.jars) state.raiz.jars = [];
+  if (id) {
+    const i = state.raiz.jars.findIndex(x => x.id === id);
+    if (i >= 0) {
+      state.raiz.jars[i] = { ...state.raiz.jars[i], name, startBalance: bal, startDate: date, weeklySplit: split };
+    }
+  } else {
+    state.raiz.jars.push({ id: uid(), name, startBalance: bal, startDate: date, weeklySplit: split, monthlyRates: {} });
+  }
+  saveStateSync(); renderRaiz(); closeModal('jar-modal');
+  showToast('Jar saved');
+}
+
+function deleteJar() {
+  const id = document.getElementById('jar-edit-id').value;
+  if (!id) return;
+  if (!confirm('Delete this jar? Its monthly rates will be lost.')) return;
+  state.raiz.jars = (state.raiz.jars || []).filter(j => j.id !== id);
+  saveStateSync(); renderRaiz(); closeModal('jar-modal');
+  showToast('Jar deleted');
 }
 
 // ════════════════════════════════════════════════════════════
