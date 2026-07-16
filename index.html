@@ -599,6 +599,7 @@ select.form-input { appearance: none; background-image: url("data:image/svg+xml,
   <!-- GOALS -->
   <div class="page" id="page-goals">
     <div style="margin-top:1rem;">
+      <div id="goals-recon"></div>
       <div id="goals-affordability" class="card"></div>
       <div style="display:flex;justify-content:flex-end;margin-bottom:0.5rem;">
         <button class="btn btn-secondary btn-sm" onclick="openGoalModal()">+ New Goal</button>
@@ -760,7 +761,7 @@ select.form-input { appearance: none; background-image: url("data:image/svg+xml,
     <div class="form-group"><label class="form-label">Goal Name</label><input class="form-input" id="g-name" placeholder="e.g. Car Registration"></div>
     <div class="form-row">
       <div class="form-group"><label class="form-label">Target ($)</label><input class="form-input" id="g-target" type="number" placeholder="3000"></div>
-      <div class="form-group"><label class="form-label">Already Saved ($)</label><input class="form-input" id="g-saved" type="number" placeholder="0"></div>
+      <div class="form-group"><label class="form-label">Starting Amount ($) — manual only</label><input class="form-input" id="g-saved" type="number" placeholder="0"><div style="font-size:0.68rem;color:var(--text2);margin-top:0.25rem;">Weekly planner allocations are added on top automatically — don&#39;t re-enter them here.</div></div>
     </div>
     <div class="form-group"><label class="form-label">Target Date</label><input class="form-input" id="g-date" type="date"></div>
     <div class="form-group"><label class="form-label">Category / Notes</label><input class="form-input" id="g-note" placeholder="Optional notes"></div>
@@ -1349,6 +1350,20 @@ function isRealIncome(t) {
 function isRealSaving(t) {
   return t.category === 'External Savings Transfer' && t.debit > 0 && !isInternalTransfer(t);
 }
+// Total money SET ASIDE in a set of transactions:
+//   external savings transfers (Raiz etc.)
+// + internal transfers landing in the Savings Account.
+// If the savings-side statement isn't imported, fall back to the debit-side
+// internal transfer debits (money leaving Debit Card to own accounts).
+function sumSavedIntoSavings(txs) {
+  const external = txs.filter(isRealSaving).reduce((a,t) => a + t.debit, 0);
+  const savingsSideIn = txs.filter(t => isInternalTransfer(t) && t.credit > 0 && t.account === 'Savings Account')
+    .reduce((a,t) => a + t.credit, 0);
+  if (savingsSideIn > 0) return Math.round((external + savingsSideIn) * 100) / 100;
+  const debitSideOut = txs.filter(t => isInternalTransfer(t) && t.debit > 0 && t.account === 'Debit Card')
+    .reduce((a,t) => a + t.debit, 0);
+  return Math.round((external + debitSideOut) * 100) / 100;
+}
 
 function autoCategory(desc) {
   const d = desc.toLowerCase();
@@ -1758,7 +1773,7 @@ function renderDashboard() {
   const txs = state.transactions.filter(t => getWeekKey(t.date) === wk);
   const totalSpend  = txs.filter(isRealSpend).reduce((a,t) => a + t.debit, 0);
   const totalIncome = txs.filter(isRealIncome).reduce((a,t) => a + t.credit, 0);
-  const totalSaved  = txs.filter(isRealSaving).reduce((a,t) => a + t.debit, 0);
+  const totalSaved  = sumSavedIntoSavings(txs);
   const netFlow     = totalIncome - totalSpend;
 
   // KPIs for this week
@@ -1782,7 +1797,7 @@ function renderDashboard() {
       <div class="kpi-card orange">
         <div class="kpi-label">Saved</div>
         <div class="kpi-value">${fmtK(totalSaved)}</div>
-        <div class="kpi-sub">External savings</div>
+        <div class="kpi-sub">Incl. transfers to savings</div>
       </div>
     </div>`;
 
@@ -2004,7 +2019,7 @@ function txRow(t) {
 }
 
 function miniGoal(g) {
-  const pct = Math.min(100, ((g.saved||0)/g.target)*100);
+  const pct = Math.min(100, (goalSaved(g)/g.target)*100);
   const wks = weeksUntil(g.date);
   const status = getGoalStatus(g);
   const statusClass = {COMPLETE:'status-complete',OVERDUE:'status-urgent',URGENT:'status-urgent','On Track':'status-ontrack','In Progress':'status-progress','Just Started':'status-started'}[status]||'status-started';
@@ -2015,7 +2030,7 @@ function miniGoal(g) {
     </div>
     <div class="progress-wrap"><div class="progress-bar" style="width:${pct}%;background:var(--green);"></div></div>
     <div style="display:flex;justify-content:space-between;font-size:0.7rem;color:var(--text2);margin-top:0.2rem;">
-      <span>${fmt(g.saved||0)} of ${fmt(g.target)}</span>
+      <span>${fmt(goalSaved(g))} of ${fmt(g.target)}</span>
       <span>${wks !== null ? wks + ' wks left' : 'No date set'}</span>
     </div>
   </div>`;
@@ -2369,13 +2384,17 @@ function computeGoalSplit(totalPay) {
   const weeklyRent = Math.round(s.rent / 2 * 100) / 100;
   const savingsX = totalPay * s.savingsPct;
   const oneoff = parseFloat(document.getElementById('planner-oneoff').value) || 0;
-  const spend = Object.values(s.budgets).reduce((a, b) => a + b, 0);
+  // Use the SAME category basis as the pay splitter's allocation (the five
+  // planner categories) — not all budgets — so goals aren't starved by
+  // categories the planner never allocates.
+  const PLANNER_BUDGET_CATS = ['Groceries & Supermarket','Transport & Fuel','Utilities & Bills','Dining & Takeaway','Miscellaneous'];
+  const spend = PLANNER_BUDGET_CATS.reduce((a, c) => a + (s.budgets[c] || 0), 0);
   const goalBudget = Math.max(0, totalPay - weeklyRent - savingsX - oneoff - spend);
 
   const goalData = activeGoals.map(g => {
     const wks = weeksUntil(g.date) || 52;
     const target = g.target || 0;
-    const saved  = g.saved  || 0;
+    const saved  = goalSaved(g);
 
     // Use a FIXED weekly rate — set once when the goal is first computed
     // and stored on the goal so saving progress doesn't change the recommendation.
@@ -2467,6 +2486,18 @@ function savePlannerSession() {
   const slack = afterFixed - sumFlex();
   if (slack > 0.005) amounts.misc = Math.round((amounts.misc + slack) * 100) / 100;
 
+  // Per-goal allocation snapshot — scaled so allocations sum to the (possibly
+  // squeezed/overridden) goals bucket in amounts
+  let goalAlloc = {};
+  if (total > 0 && amounts.goals > 0) {
+    const split = computeGoalSplit(total);
+    const rawTotal = split.reduce((a, d) => a + d.allocated, 0);
+    const scale = rawTotal > 0 ? amounts.goals / rawTotal : 0;
+    split.forEach(d => {
+      goalAlloc[d.g.id] = Math.round(d.allocated * scale * 100) / 100;
+    });
+  }
+
   const record = {
     pay:    document.getElementById('planner-pay').value,
     extra:  document.getElementById('planner-extra').value,
@@ -2474,6 +2505,7 @@ function savePlannerSession() {
     rent:   document.getElementById('planner-rent').value,
     overrides: JSON.parse(JSON.stringify(splitOverrides)),
     amounts:   amounts,   // ← snapshotted at save time, not on every render
+    goalAlloc: goalAlloc, // ← per-goal distribution for auto-populating goal progress
   };
 
   if (!state.plannerWeeks) state.plannerWeeks = {};
@@ -2744,7 +2776,7 @@ function updatePlanner() {
         const g = d.g;
         const gPct      = total > 0       ? (d.allocated / total    * 100).toFixed(1) : '0.0';
         const gSharePct = goalTotal > 0 ? (d.allocated / goalTotal * 100).toFixed(0) : '0';
-        const savedPct = Math.min(100, ((g.saved || 0) / g.target) * 100).toFixed(0);
+        const savedPct = Math.min(100, (goalSaved(g) / g.target) * 100).toFixed(0);
         const urgColor = d.wks <= 4 ? 'var(--red)' : d.wks <= 12 ? 'var(--orange)' : 'var(--green)';
         const urgIcon  = d.wks <= 4 ? '🔥' : d.wks <= 12 ? '⚡' : '📅';
         const trackIcon = d.onTrack ? '✅' : '⚠️';
@@ -2830,7 +2862,7 @@ function renderPlannerVsActual(wk, rows, amounts) {
     'Transport & Fuel':        amounts.transport || 0,
     'Utilities & Bills':       amounts.bills     || 0,
     'Miscellaneous':           amounts.misc      || 0,
-    'External Savings Transfer': amounts.savings   || 0,
+    'External Savings Transfer': Math.round(((amounts.savings || 0) + (amounts.goals || 0)) * 100) / 100,
     'Entertainment & Subs':    0,
     'Health & Medical':        0,
     'Clothing & Personal':     0,
@@ -2842,6 +2874,8 @@ function renderPlannerVsActual(wk, rows, amounts) {
   weekTxs.filter(isRealSpend).forEach(t => {
     actualMap[t.category] = (actualMap[t.category] || 0) + t.debit;
   });
+  // Set-aside actuals (external + internal into savings) tracked separately
+  actualMap['External Savings Transfer'] = sumSavedIntoSavings(weekTxs);
   const actualIncome = weekTxs.filter(isRealIncome).reduce((a,t) => a + t.credit, 0);
 
   const hasActual = weekTxs.length > 0;
@@ -2855,6 +2889,7 @@ function renderPlannerVsActual(wk, rows, amounts) {
 
   // Build comparison rows for categories that have a plan or actual spend
   const compareCats = [
+    { cat: 'External Savings Transfer', icon: '🏦', label: 'Set Aside (Savings + Goals)' },
     { cat: 'Groceries & Supermarket', icon: '🟢' },
     { cat: 'Dining & Takeaway',       icon: '🔵' },
     { cat: 'Transport & Fuel',        icon: '⛽' },
@@ -2889,18 +2924,20 @@ function renderPlannerVsActual(wk, rows, amounts) {
       '</div>' +
     '</div>' : '';
 
-  const catRows = compareCats.map(({cat, icon}) => {
+  const catRows = compareCats.map(({cat, icon, label}) => {
     const planned = planMap[cat] || 0;
     const actual  = actualMap[cat] || 0;
     if (planned === 0 && actual === 0) return '';
     const diff = actual - planned;
-    const over = diff > 0.5;
-    const under = diff < -0.5;
+    const isSavingsRow = cat === 'External Savings Transfer';
+    // For spending, over plan is bad; for set-aside, UNDER plan is bad
+    const over  = isSavingsRow ? diff < -0.5 : diff > 0.5;
+    const under = isSavingsRow ? diff > 0.5  : diff < -0.5;
     const pct = planned > 0 ? Math.min(100, actual / planned * 100) : (actual > 0 ? 100 : 0);
     const barColor = over ? 'var(--red)' : 'var(--green)';
     return '<div style="margin-bottom:0.75rem;">' +
       '<div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:0.25rem;">' +
-        '<div style="font-size:0.82rem;font-weight:600;">' + icon + ' ' + cat + '</div>' +
+        '<div style="font-size:0.82rem;font-weight:600;">' + icon + ' ' + (label || cat) + '</div>' +
         '<div style="display:flex;gap:0.75rem;align-items:center;">' +
           '<div style="text-align:right;">' +
             '<div style="font-size:0.65rem;color:var(--text2);">Planned</div>' +
@@ -2930,8 +2967,8 @@ function renderPlannerVsActual(wk, rows, amounts) {
     '</div>' : '';
 
   // Total planned vs actual spend
-  const totalPlanned = Object.values(planMap).reduce((a,b) => a+b, 0);
-  const totalActual  = Object.values(actualMap).reduce((a,b) => a+b, 0);
+  const totalPlanned = Object.entries(planMap).filter(([k]) => k !== 'External Savings Transfer').reduce((a,[,v]) => a+v, 0);
+  const totalActual  = Object.entries(actualMap).filter(([k]) => k !== 'External Savings Transfer').reduce((a,[,v]) => a+v, 0);
   const totalDiff    = totalActual - totalPlanned;
 
   const summaryRow = hasActual ?
@@ -3006,13 +3043,15 @@ function renderLastWeek() {
   const plannedPay   = parseFloat(plannerRecord.pay   || s.weeklyPay || 0);
   const plannedExtra = parseFloat(plannerRecord.extra || 0);
   const plannedTotal = plannedPay + plannedExtra;
+  // Planned set-aside = savings bucket + goals bucket (both are transferred
+  // to the savings account / investments each Thursday)
   const plannedSavings = plannerAmounts
-    ? (plannerAmounts.savings || Math.round(plannedTotal * s.savingsPct * 100)/100)
+    ? Math.round(((plannerAmounts.savings || 0) + (plannerAmounts.goals || 0)) * 100) / 100
     : Math.round(plannedTotal * s.savingsPct * 100)/100;
 
   const lastIncome = lastTxs.filter(isRealIncome).reduce((a,t) => a + t.credit, 0);
   const lastSpend  = lastTxs.filter(isRealSpend).reduce((a,t) => a + t.debit, 0);
-  const lastSaved  = lastTxs.filter(isRealSaving).reduce((a,t) => a + t.debit, 0);
+  const lastSaved  = sumSavedIntoSavings(lastTxs);
   const lastNet    = lastIncome - lastSpend;
   const metSavings = lastSaved >= plannedSavings && plannedSavings > 0;
 
@@ -3217,7 +3256,7 @@ function renderMonthly() {
   const s = state.settings;
   const totalSpend  = monthTxs.filter(isRealSpend).reduce((a,t) => a+t.debit, 0);
   const totalIncome = monthTxs.filter(isRealIncome).reduce((a,t) => a+t.credit, 0);
-  const totalSaved  = monthTxs.filter(isRealSaving).reduce((a,t) => a+t.debit, 0);
+  const totalSaved  = sumSavedIntoSavings(monthTxs);
   const netFlow     = totalIncome - totalSpend;
 
   // How many weeks are in this month
@@ -3338,7 +3377,7 @@ function renderTaxYear() {
   const s = state.settings;
   const totalIncome  = fyTxs.filter(isRealIncome).reduce((a,t) => a+t.credit, 0);
   const totalSpend   = fyTxs.filter(isRealSpend).reduce((a,t) => a+t.debit, 0);
-  const totalSaved   = fyTxs.filter(isRealSaving).reduce((a,t) => a+t.debit, 0);
+  const totalSaved   = sumSavedIntoSavings(fyTxs);
   const weekCount    = new Set(fyTxs.map(t => getWeekKey(t.date))).size;
 
   // Potentially deductible categories (informational only — not tax advice)
@@ -3826,10 +3865,24 @@ function deleteAnnual(id) {
 // ════════════════════════════════════════════════════════════
 // GOALS
 // ════════════════════════════════════════════════════════════
+// ── Goal progress = manual starting amount + auto-populated planner allocations ──
+function goalAutoSaved(g) {
+  let sum = 0;
+  Object.values(state.plannerWeeks || {}).forEach(pw => {
+    if (pw && pw.pay && pw.pay !== '' && pw.goalAlloc && pw.goalAlloc[g.id]) {
+      sum += pw.goalAlloc[g.id];
+    }
+  });
+  return Math.round(sum * 100) / 100;
+}
+function goalSaved(g) {
+  return Math.round(((g.saved || 0) + goalAutoSaved(g)) * 100) / 100;
+}
+
 function getGoalStatus(g) {
   const wks = weeksUntil(g.date);
-  const pct = (g.saved||0) / g.target;
-  if ((g.saved||0) >= g.target) return 'COMPLETE';
+  const pct = goalSaved(g) / g.target;
+  if (goalSaved(g) >= g.target) return 'COMPLETE';
   if (g.date && g.date < brisbaneToday()) return 'OVERDUE';
   if (wks !== null && wks <= 4) return 'URGENT';
   if (pct >= 0.75) return 'On Track';
@@ -3840,10 +3893,33 @@ function getGoalStatus(g) {
 function renderGoals() {
   const s = state.settings;
   const totalGoalPerWk = state.goals.filter(g => getGoalStatus(g) !== 'COMPLETE').reduce((a,g) => {
-    const wks = weeksUntil(g.date); const needed = (g.target||0) - (g.saved||0);
+    const wks = weeksUntil(g.date); const needed = (g.target||0) - goalSaved(g);
     return a + (wks > 0 ? needed/wks : 0);
   }, 0);
   const affordable = s.weeklyPay - (s.rent/2) - (s.weeklyPay*s.savingsPct) - totalGoalPerWk >= 0; // rent/2 = weekly accrual
+  // Reconciliation: goals' total progress vs actual Savings Account balance
+  const savBal = computeAccountBalance('Savings Account');
+  const totalGoalSaved = state.goals.reduce((a, g) => a + goalSaved(g), 0);
+  const reconEl = document.getElementById('goals-recon');
+  if (reconEl) {
+    if (savBal === null || !state.goals.length) {
+      reconEl.innerHTML = '';
+    } else {
+      const covered = savBal >= totalGoalSaved;
+      const diff = Math.round((savBal - totalGoalSaved) * 100) / 100;
+      reconEl.innerHTML = '<div class="card" style="margin-bottom:1rem;border-left:3px solid ' + (covered ? 'var(--green)' : 'var(--orange)') + ';">' +
+        '<div style="display:flex;justify-content:space-between;align-items:center;">' +
+          '<div>' +
+            '<div style="font-size:0.8rem;font-weight:700;">' + (covered ? '✅ Goals fully backed by savings' : '⚠️ Goals ahead of savings balance') + '</div>' +
+            '<div style="font-size:0.7rem;color:var(--text2);margin-top:0.15rem;">Savings balance ' + fmt(savBal) + ' vs ' + fmt(totalGoalSaved) + ' allocated to goals</div>' +
+          '</div>' +
+          '<div style="font-size:0.95rem;font-weight:800;color:' + (covered ? 'var(--green)' : 'var(--orange)') + ';">' + (diff >= 0 ? '+' : '') + fmt(diff) + '</div>' +
+        '</div>' +
+        (!covered ? '<div style="font-size:0.7rem;color:var(--text2);margin-top:0.4rem;">Transfer the difference into savings, or check that planner weeks were only saved when you actually moved the money.</div>' : '') +
+      '</div>';
+    }
+  }
+
   document.getElementById('goals-affordability').innerHTML = `
     <div class="card-title">Affordability Check</div>
     <div style="display:flex;justify-content:space-between;margin-bottom:0.5rem;">
@@ -3861,8 +3937,10 @@ function renderGoals() {
   document.getElementById('goals-list').innerHTML = state.goals.map(g => {
     const wks = weeksUntil(g.date);
     const status = getGoalStatus(g);
-    const pct = Math.min(100, ((g.saved||0)/g.target)*100);
-    const needed = Math.max(0, g.target - (g.saved||0));
+    const autoAmt = goalAutoSaved(g);
+    const totalSaved = goalSaved(g);
+    const pct = Math.min(100, (totalSaved/g.target)*100);
+    const needed = Math.max(0, g.target - totalSaved);
     const perWk = wks > 0 ? needed/wks : 0;
     const statusClass = status === 'URGENT' || status === 'OVERDUE' ? 'urgent' : status === 'COMPLETE' || status === 'On Track' ? 'ontrack' : '';
     return `<div class="goal-card ${statusClass}">
@@ -3877,7 +3955,7 @@ function renderGoals() {
       ${g.note ? `<div style="font-size:0.75rem;color:var(--text2);margin-bottom:0.4rem;">${g.note}</div>` : ''}
       <div class="progress-wrap"><div class="progress-bar" style="width:${pct}%;background:var(--green);"></div></div>
       <div class="goal-amounts">
-        <span>${fmt(g.saved||0)} saved of ${fmt(g.target)}</span>
+        <span>${fmt(totalSaved)} saved of ${fmt(g.target)}${autoAmt > 0 ? ` <span style="font-size:0.68rem;color:var(--accent);">(${fmt(autoAmt)} auto)</span>` : ''}</span>
         <span>${wks !== null ? wks + ' weeks left' : 'No deadline'}</span>
       </div>
       ${wks > 0 && needed > 0 ? `<div style="margin-top:0.5rem;padding:0.5rem;background:#F8F8F8;border-radius:8px;font-size:0.8rem;text-align:center;">Save <strong>${fmt(perWk)}/week</strong> or <strong>${fmt(perWk*2)}/fortnight</strong> to hit this goal</div>` : ''}
