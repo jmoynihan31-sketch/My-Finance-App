@@ -853,17 +853,18 @@ select.form-input { appearance: none; background-image: url("data:image/svg+xml,
   <div class="modal">
     <div class="modal-handle"></div>
     <h2>Account Balance</h2>
-    <div style="font-size:0.78rem;color:var(--text2);margin-bottom:1rem;">Enter each balance as at the <strong>end</strong> of the chosen day — you only do this once. The app tracks it forward from your transactions, and your Savings balance automatically funds your bills reserve and goals.</div>
+    <div style="font-size:0.78rem;color:var(--text2);margin-bottom:1rem;">Enter your balance as at the <strong>end</strong> of a chosen day. Every transaction <strong>after</strong> that day then adds to or subtracts from it automatically. Tip: the date is pre-set to just before your earliest imported transaction, so all your history counts — but you can set it to today with today&#39;s balance instead.</div>
     <div class="form-group"><label class="form-label">Account</label>
-      <select class="form-input" id="bal-account" onchange="onBalanceAccountChange()">
+      <select class="form-input" id="bal-account" onchange="onBalanceAccountChange();updateBalancePreview()">
         <option value="Debit Card">💳 Debit Card</option>
         <option value="Savings Account">🏦 Savings Account</option>
       </select>
     </div>
     <div class="form-row">
-      <div class="form-group"><label class="form-label">Balance ($)</label><input class="form-input" id="bal-amount" type="number" step="0.01" placeholder="0.00"></div>
-      <div class="form-group"><label class="form-label">As at end of</label><input class="form-input" id="bal-asof" type="date"></div>
+      <div class="form-group"><label class="form-label">Balance ($)</label><input class="form-input" id="bal-amount" type="number" step="0.01" placeholder="0.00" oninput="updateBalancePreview()"></div>
+      <div class="form-group"><label class="form-label">As at end of</label><input class="form-input" id="bal-asof" type="date" onchange="updateBalancePreview()"></div>
     </div>
+    <div id="balance-preview" style="font-size:0.75rem;color:var(--text2);margin-bottom:1rem;min-height:1rem;"></div>
     <div class="form-actions">
       <button class="btn btn-outline btn-full" onclick="closeModal('balance-modal')">Cancel</button>
       <button class="btn btn-primary btn-full" onclick="saveBalance()">Save</button>
@@ -1688,18 +1689,45 @@ function isBalanceAnchored(account) {
   return !!(ab && ab.amount !== undefined && ab.amount !== null);
 }
 
+function suggestAnchorDate(account) {
+  // Default the "as at" date to the day BEFORE the earliest transaction for this
+  // account, so that ALL imported history counts forward from the balance.
+  // If the user enters today's balance instead, they can pick today — but this
+  // default means an existing statement import isn't silently ignored.
+  const accTxs = state.transactions.filter(t => t.account === account);
+  if (!accTxs.length) return brisbaneToday();
+  const earliest = accTxs.reduce((min, t) => t.date < min ? t.date : min, accTxs[0].date);
+  const [y,m,d] = earliest.split('-').map(Number);
+  const dayBefore = new Date(Date.UTC(y, m-1, d) - 86400000);
+  return dayBefore.getUTCFullYear() + '-' + String(dayBefore.getUTCMonth()+1).padStart(2,'0') + '-' + String(dayBefore.getUTCDate()).padStart(2,'0');
+}
 function openBalanceModal() {
   const accSel = document.getElementById('bal-account').value;
   const ab = (state.accountBalances || {})[accSel];
   document.getElementById('bal-amount').value = ab ? ab.amount : '';
-  document.getElementById('bal-asof').value = ab ? ab.asOf : brisbaneToday();
+  document.getElementById('bal-asof').value = ab ? ab.asOf : suggestAnchorDate(accSel);
   openModal('balance-modal');
+  setTimeout(updateBalancePreview, 50);
 }
 function onBalanceAccountChange() {
   const accSel = document.getElementById('bal-account').value;
   const ab = (state.accountBalances || {})[accSel];
   document.getElementById('bal-amount').value = ab ? ab.amount : '';
-  document.getElementById('bal-asof').value = ab ? ab.asOf : brisbaneToday();
+  document.getElementById('bal-asof').value = ab ? ab.asOf : suggestAnchorDate(accSel);
+}
+function updateBalancePreview() {
+  const acc  = document.getElementById('bal-account').value;
+  const amt  = parseFloat(document.getElementById('bal-amount').value);
+  const asOf = document.getElementById('bal-asof').value;
+  const el = document.getElementById('balance-preview');
+  if (!el) return;
+  if (isNaN(amt) || !asOf) { el.innerHTML = ''; return; }
+  const flow = state.transactions
+    .filter(t => t.account === acc && t.date > asOf)
+    .reduce((a,t) => a + t.credit - t.debit, 0);
+  const projected = Math.round((amt + flow) * 100) / 100;
+  const nTx = state.transactions.filter(t => t.account === acc && t.date > asOf).length;
+  el.innerHTML = '📊 With ' + nTx + ' transaction' + (nTx!==1?'s':'') + ' after ' + asOf + ', your current balance will show as <strong style="color:var(--text);">' + fmt(projected) + '</strong>';
 }
 function saveBalance() {
   const acc  = document.getElementById('bal-account').value;
@@ -3977,21 +4005,54 @@ function computeSavingsAllocation() {
   const annualReserved = Math.round(annual.reduce((a, e) => a + e.reserved, 0) * 100) / 100;
   const annualNeeded   = Math.round(annual.reduce((a, e) => a + e.shouldHave, 0) * 100) / 100;
 
-  // 2. Goals — deadline order. Pass 1 keeps each on pace, pass 2 tops up nearest.
+  // 2. Goals — split the available savings PROPORTIONALLY across all goals by
+  //    what each needs and how soon it is due, rather than draining everything
+  //    into the nearest-deadline goal.
+  //
+  //    Each goal gets a "weight" = required weekly rate = target / weeks(created→due).
+  //    A goal that needs more money sooner has a higher weekly rate and therefore
+  //    a larger share. We distribute in proportion to these weights, capped so no
+  //    goal exceeds its target; any leftover from capped goals is re-split among
+  //    the others, then anything still remaining becomes free buffer.
   const goals = state.goals.filter(g => (g.target || 0) > 0);
-  const sorted = [...goals].sort((a, b) => (a.date || '9999-99-99').localeCompare(b.date || '9999-99-99'));
   const goalAlloc = {};
-  sorted.forEach(g => { goalAlloc[g.id] = 0; });
-  sorted.forEach(g => {
-    const onTrack = Math.min(g.target || 0, goalOnTrackAmount(g));
-    const add = Math.min(remaining, onTrack);
-    goalAlloc[g.id] += add; remaining = Math.round((remaining - add) * 100) / 100;
-  });
-  sorted.forEach(g => {
-    const room = (g.target || 0) - goalAlloc[g.id];
-    const add = Math.min(remaining, Math.max(0, room));
-    goalAlloc[g.id] += add; remaining = Math.round((remaining - add) * 100) / 100;
-  });
+  goals.forEach(g => { goalAlloc[g.id] = 0; });
+
+  // Weight = required weekly contribution to hit target by deadline (min 1 week)
+  function goalWeight(g) {
+    const created = g.createdAt || brisbaneToday();
+    const totalWks = Math.max(1, weeksBetweenDates(created, g.date || '9999-12-31'));
+    return (g.target || 0) / totalWks;
+  }
+
+  let pool = remaining;
+  // Iteratively distribute proportionally; re-run while there's pool left and
+  // at least one goal still has room (handles caps spilling over cleanly).
+  for (let iter = 0; iter < 12 && pool > 0.01; iter++) {
+    const open = goals.filter(g => goalAlloc[g.id] < (g.target || 0) - 0.01);
+    if (!open.length) break;
+    const totalWeight = open.reduce((a, g) => a + goalWeight(g), 0);
+    if (totalWeight <= 0) {
+      // No deadlines/targets to weight by — split evenly among open goals
+      const each = pool / open.length;
+      open.forEach(g => {
+        const room = (g.target || 0) - goalAlloc[g.id];
+        const add = Math.min(each, room);
+        goalAlloc[g.id] += add; pool -= add;
+      });
+      continue;
+    }
+    let distributed = 0;
+    open.forEach(g => {
+      const share = goalWeight(g) / totalWeight;
+      const room = (g.target || 0) - goalAlloc[g.id];
+      const add = Math.min(pool * share, room);
+      goalAlloc[g.id] += add; distributed += add;
+    });
+    pool = Math.round((pool - distributed) * 100) / 100;
+    if (distributed < 0.01) break; // everything hit its cap
+  }
+  remaining = Math.round(pool * 100) / 100;
   Object.keys(goalAlloc).forEach(k => { goalAlloc[k] = Math.round(goalAlloc[k] * 100) / 100; });
   const goalsReserved = Math.round(Object.values(goalAlloc).reduce((a, v) => a + v, 0) * 100) / 100;
 
